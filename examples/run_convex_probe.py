@@ -44,7 +44,7 @@ def main():
     sig, sr = tone_burst(center_freq=tx.center_freq, sampling_rate=int(fs), n_cycles=2)
 
     elem_idx = tx.map_to_grid(grid, z0=0.0)
-    src_positions = [(iz * grid.ny + iy) * grid.nx + ix for (ix, iy, iz) in elem_idx[::4]]
+    src_positions = [grid.to_linear_index(ix, iy, iz) for (ix, iy, iz) in elem_idx[::4]]
 
     solver = SolverCore(grid, (med.rho, med.c, med.alpha), dtype=np.float16)
 

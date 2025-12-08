@@ -49,7 +49,7 @@ def main():
     # convert (ix,iy,iz) to linear indices for solver's flattened layout (nx x ny x nz)
     src_positions = []
     for (ix, iy, iz) in elem_idx[::4]:  # use every 4th element to reduce source count
-        src_positions.append((iz * grid.ny + iy) * grid.nx + ix)
+        src_positions.append(grid.to_linear_index(ix, iy, iz))
 
     # get ROI from medium for small window (use whole for simplicity)
     rho, c, alpha = med.rho, med.c, med.alpha

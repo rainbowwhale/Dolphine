@@ -44,7 +44,7 @@ def main():
     elem_idx = tx.map_to_grid(grid, z0=0.0)
     src_positions = []
     for (ix, iy, iz) in elem_idx[::2]:  # use every 2nd element
-        src_positions.append((iz * grid.ny + iy) * grid.nx + ix)
+        src_positions.append(grid.to_linear_index(ix, iy, iz))
 
     # Get medium properties
     rho, c, alpha = med.rho, med.c, med.alpha

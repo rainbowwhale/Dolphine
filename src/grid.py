@@ -34,3 +34,10 @@ class Grid:
         iy = int(round(y / self.dy))
         iz = int(round(z / self.dz))
         return ix, iy, iz
+
+    def to_linear_index(self, ix, iy, iz):
+        """Convert 3D grid indices (ix, iy, iz) to linear index for flattened 3D array.
+        
+        Uses row-major ordering: idx = (iz * ny + iy) * nx + ix
+        """
+        return (iz * self.ny + iy) * self.nx + ix
