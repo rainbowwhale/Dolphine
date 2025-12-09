@@ -56,7 +56,9 @@ class Transducer:
         return idx
 
     def generate_element_surface_points(self, element_idx, n_points_x=None, n_points_y=None, 
-                                       grid=None, grid_aligned=True):
+                                       grid=None, grid_aligned=True,
+                                       grid_center_only_x=False, grid_center_only_y=False,
+                                       grid_center_only_z=False):
         """Generate a set of points on the surface of a rectangular element.
         
         Args:
@@ -67,6 +69,9 @@ class Transducer:
                        If None and grid is provided, calculated from grid spacing.
             grid: Grid object for automatic point spacing calculation
             grid_aligned: If True and grid provided, align points with grid spacing
+            grid_center_only_x: If True, constrain x coordinates to grid centers only
+            grid_center_only_y: If True, constrain y coordinates to grid centers only
+            grid_center_only_z: If True, constrain z coordinates to grid centers only
             
         Returns:
             points: Array of shape (n_points, 3) with (x, y, z) coordinates in meters
@@ -80,19 +85,21 @@ class Transducer:
         
         # Calculate number of points based on grid spacing if not provided
         if grid is not None and grid_aligned:
-            if n_points_x is None:
-                # Use grid spacing to determine number of points (Nyquist criterion: at least 2 points per grid cell)
-                n_points_x = max(3, int(np.ceil(self.element_width / grid.dx)) + 1)
-            if n_points_y is None:
-                n_points_y = max(3, int(np.ceil(self.element_height / grid.dy)) + 1)
+            # Use minimum grid spacing for point spacing (more conservative sampling)
+            min_grid_spacing = min(grid.dx, grid.dy, grid.dz)
             
-            # Generate grid-aligned points
-            # Align to grid spacing for better interpolation accuracy
-            x_samples = np.arange(n_points_x) * grid.dx
+            if n_points_x is None:
+                # Use minimum grid spacing to determine number of points
+                n_points_x = max(3, int(np.ceil(self.element_width / min_grid_spacing)) + 1)
+            if n_points_y is None:
+                n_points_y = max(3, int(np.ceil(self.element_height / min_grid_spacing)) + 1)
+            
+            # Generate grid-aligned points using minimum spacing
+            x_samples = np.arange(n_points_x) * min_grid_spacing
             x_samples = x_samples - x_samples.mean()  # Center around zero
             x_samples = np.clip(x_samples, -self.element_width/2, self.element_width/2)
             
-            y_samples = np.arange(n_points_y) * grid.dy
+            y_samples = np.arange(n_points_y) * min_grid_spacing
             y_samples = y_samples - y_samples.mean()  # Center around zero
             y_samples = np.clip(y_samples, -self.element_height/2, self.element_height/2)
         else:
@@ -110,11 +117,32 @@ class Transducer:
         y_coords = yy.flatten()
         z_coords = np.full_like(x_coords, center_z)
         
+        # Apply grid-center-only constraints if requested
+        if grid is not None:
+            grid_center_x, grid_center_y, grid_center_z = self._compute_grid_centers(grid)
+            
+            if grid_center_only_x:
+                # Snap x coordinates to nearest grid center
+                x_indices = np.round((x_coords + grid_center_x) / grid.dx).astype(int)
+                x_coords = x_indices * grid.dx - grid_center_x
+            
+            if grid_center_only_y:
+                # Snap y coordinates to nearest grid center
+                y_indices = np.round((y_coords + grid_center_y) / grid.dy).astype(int)
+                y_coords = y_indices * grid.dy - grid_center_y
+            
+            if grid_center_only_z:
+                # Snap z coordinates to nearest grid center
+                z_indices = np.round((z_coords + grid_center_z) / grid.dz).astype(int)
+                z_coords = z_indices * grid.dz - grid_center_z
+        
         points = np.stack([x_coords, y_coords, z_coords], axis=1)
         return points
 
     def generate_all_elements_surface_points(self, n_points_x=None, n_points_y=None, 
-                                            grid=None, grid_aligned=True):
+                                            grid=None, grid_aligned=True,
+                                            grid_center_only_x=False, grid_center_only_y=False,
+                                            grid_center_only_z=False):
         """Generate surface points for all transducer elements.
         
         Args:
@@ -122,6 +150,9 @@ class Transducer:
             n_points_y: Number of sample points along element height (elevation direction)
             grid: Grid object for automatic point spacing calculation
             grid_aligned: If True and grid provided, align points with grid spacing
+            grid_center_only_x: If True, constrain x coordinates to grid centers only
+            grid_center_only_y: If True, constrain y coordinates to grid centers only
+            grid_center_only_z: If True, constrain z coordinates to grid centers only
             
         Returns:
             points_list: List of arrays, each containing points for one element
@@ -132,31 +163,29 @@ class Transducer:
         
         for elem_idx in range(self.n_elements):
             points = self.generate_element_surface_points(
-                elem_idx, n_points_x, n_points_y, grid, grid_aligned
+                elem_idx, n_points_x, n_points_y, grid, grid_aligned,
+                grid_center_only_x, grid_center_only_y, grid_center_only_z
             )
             points_list.append(points)
             element_indices.append(elem_idx)
         
         return points_list, element_indices
 
-    def calculate_bli_points_for_error(self, grid, error_tolerance=0.01):
+    def calculate_bli_points_for_error(self, error_tolerance=0.01, grid=None):
         """Calculate the number of BLI sampling points needed for a given error tolerance.
         
-        Based on Nyquist sampling theorem and band-limited interpolation theory,
-        the number of points needed depends on the ratio of element size to grid spacing.
+        Can work with or without grid spacing information. When grid is provided,
+        uses grid spacing for more accurate calculation. When grid is None, uses
+        a conservative estimate based on element dimensions alone.
         
         Args:
-            grid: Grid object defining the computational domain
             error_tolerance: Desired relative error tolerance (e.g., 0.01 for 1% error)
                            Smaller values require more sampling points
+            grid: Grid object (optional). If None, calculates based on element size only.
             
         Returns:
             tuple: (n_points_x, n_points_y) recommended number of sampling points
         """
-        # Nyquist-Shannon sampling: need at least 2 samples per grid spacing unit
-        # For BLI with error tolerance, use: n = ceil(element_size / grid_spacing) * factor
-        # where factor depends on desired accuracy
-        
         # Error tolerance to oversampling factor mapping
         # Lower error requires higher oversampling
         if error_tolerance <= 0.001:  # 0.1% error
@@ -168,9 +197,22 @@ class Transducer:
         else:  # > 5% error
             factor = 1.5
         
-        # Calculate based on element size and grid spacing
-        n_points_x = max(3, int(np.ceil(self.element_width / grid.dx * factor)))
-        n_points_y = max(3, int(np.ceil(self.element_height / grid.dy * factor)))
+        if grid is not None:
+            # Calculate based on element size and minimum grid spacing
+            # Use minimum grid spacing for conservative sampling
+            min_grid_spacing = min(grid.dx, grid.dy, grid.dz)
+            n_points_x = max(3, int(np.ceil(self.element_width / min_grid_spacing * factor)))
+            n_points_y = max(3, int(np.ceil(self.element_height / min_grid_spacing * factor)))
+        else:
+            # Grid-independent calculation based on element dimensions
+            # Use a heuristic: assume typical wavelength-based sampling
+            # For ultrasound at typical frequencies (1-20 MHz) with c=1540 m/s,
+            # wavelengths range from ~0.08mm to 1.5mm
+            # Use conservative estimate: assume finest expected grid spacing ~0.05mm (50 µm)
+            assumed_min_spacing = 5e-5  # 50 micrometers
+            
+            n_points_x = max(3, int(np.ceil(self.element_width / assumed_min_spacing * factor)))
+            n_points_y = max(3, int(np.ceil(self.element_height / assumed_min_spacing * factor)))
         
         return n_points_x, n_points_y
 
@@ -226,7 +268,9 @@ class Transducer:
         return x, y, z
     def band_limited_interpolation_mask(self, grid, element_idx, n_points_x=None, n_points_y=None, 
                                        z0=0.0, staggered=False, kernel_radius=None, 
-                                       error_tolerance=None, grid_aligned=True):
+                                       error_tolerance=None, grid_aligned=True,
+                                       grid_center_only_x=False, grid_center_only_y=False,
+                                       grid_center_only_z=False):
         """Create a mask using band-limited interpolation for a single element.
         
         Based on band-limited interpolation method from https://doi.org/10.1121/1.5116132
@@ -244,7 +288,10 @@ class Transducer:
             kernel_radius: Sinc kernel radius in grid cells (default: 3)
                           Larger values increase accuracy but also computation cost
             error_tolerance: If provided, auto-calculate n_points for this error level
-            grid_aligned: If True, align sampling points with grid spacing
+            grid_aligned: If True, align sampling points with minimum grid spacing
+            grid_center_only_x: If True, constrain x coordinates to grid centers only
+            grid_center_only_y: If True, constrain y coordinates to grid centers only
+            grid_center_only_z: If True, constrain z coordinates to grid centers only
             
         Returns:
             mask: Array of shape matching grid dimensions with interpolated weights
@@ -254,11 +301,12 @@ class Transducer:
         
         # Auto-calculate number of points based on error tolerance
         if error_tolerance is not None:
-            n_points_x, n_points_y = self.calculate_bli_points_for_error(grid, error_tolerance)
+            n_points_x, n_points_y = self.calculate_bli_points_for_error(error_tolerance, grid)
             
         # Generate surface points for this element
         points = self.generate_element_surface_points(
-            element_idx, n_points_x, n_points_y, grid, grid_aligned
+            element_idx, n_points_x, n_points_y, grid, grid_aligned,
+            grid_center_only_x, grid_center_only_y, grid_center_only_z
         )
         
         # Adjust points z-coordinate
@@ -324,7 +372,8 @@ class Transducer:
 
     def create_element_masks(self, grid, z0=0.0, n_points_x=None, n_points_y=None, 
                             staggered=False, kernel_radius=None, error_tolerance=None,
-                            grid_aligned=True):
+                            grid_aligned=True, grid_center_only_x=False, 
+                            grid_center_only_y=False, grid_center_only_z=False):
         """Create masks for all transducer elements.
         
         Note: For large grids with many elements, this method can consume significant memory
@@ -335,7 +384,7 @@ class Transducer:
         
         Performance optimizations for large arrays (e.g., 2D matrix probes with 10K elements):
         - Uses vectorized operations to avoid nested loops
-        - Grid-aligned sampling for better interpolation accuracy
+        - Grid-aligned sampling using minimum grid spacing for better interpolation accuracy
         - Adaptive point calculation based on error tolerance
         
         Args:
@@ -346,7 +395,10 @@ class Transducer:
             staggered: If True, use staggered grid offsets
             kernel_radius: Sinc kernel radius in grid cells (default: 3)
             error_tolerance: If provided, auto-calculate n_points (e.g., 0.01 for 1% error)
-            grid_aligned: If True, align sampling points with grid spacing
+            grid_aligned: If True, align sampling points with minimum grid spacing
+            grid_center_only_x: If True, constrain x coordinates to grid centers only
+            grid_center_only_y: If True, constrain y coordinates to grid centers only
+            grid_center_only_z: If True, constrain z coordinates to grid centers only
             
         Returns:
             masks: List of mask arrays, one for each element
@@ -355,7 +407,8 @@ class Transducer:
         for elem_idx in range(self.n_elements):
             mask = self.band_limited_interpolation_mask(
                 grid, elem_idx, n_points_x, n_points_y, z0, staggered, 
-                kernel_radius, error_tolerance, grid_aligned
+                kernel_radius, error_tolerance, grid_aligned,
+                grid_center_only_x, grid_center_only_y, grid_center_only_z
             )
             masks.append(mask)
         return masks
