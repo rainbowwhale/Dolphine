@@ -9,6 +9,9 @@ class Transducer:
     Reference for band-limited interpolation:
     https://doi.org/10.1121/1.5116132
     """
+    
+    # Default sinc kernel radius for band-limited interpolation (in grid cells)
+    DEFAULT_KERNEL_RADIUS = 3
 
     def __init__(self, n_elements=64, pitch=0.0003, element_width=0.00028, kerf=0.00002, 
                  center_freq=5e6, c=1540.0, element_height=0.010):
@@ -104,8 +107,58 @@ class Transducer:
         
         return points_list, element_indices
 
+    def _compute_grid_centers(self, grid):
+        """Compute grid center offsets for centered coordinate system.
+        
+        The Grid class uses world coordinates starting at (0,0,0), but transducer
+        elements are positioned relative to a centered coordinate system. This method
+        computes the offsets needed to convert between these systems.
+        
+        Args:
+            grid: Grid object
+            
+        Returns:
+            tuple: (grid_center_x, grid_center_y, grid_center_z) in meters
+        """
+        grid_center_x = (grid.nx - 1) * grid.dx / 2.0
+        grid_center_y = (grid.ny - 1) * grid.dy / 2.0
+        grid_center_z = (grid.nz - 1) * grid.dz / 2.0
+        return grid_center_x, grid_center_y, grid_center_z
+
+    def _world_to_centered_grid_index(self, x, y, z, grid):
+        """Convert world coordinates to grid indices using centered coordinate system.
+        
+        Args:
+            x, y, z: World coordinates in meters
+            grid: Grid object
+            
+        Returns:
+            tuple: (ix, iy, iz) grid indices
+        """
+        grid_center_x, grid_center_y, grid_center_z = self._compute_grid_centers(grid)
+        ix = int(round((x + grid_center_x) / grid.dx))
+        iy = int(round((y + grid_center_y) / grid.dy))
+        iz = int(round((z + grid_center_z) / grid.dz))
+        return ix, iy, iz
+
+    def _centered_grid_index_to_world(self, ix, iy, iz, grid, offset_x=0.0, offset_y=0.0, offset_z=0.0):
+        """Convert grid indices to world coordinates using centered coordinate system.
+        
+        Args:
+            ix, iy, iz: Grid indices
+            grid: Grid object
+            offset_x, offset_y, offset_z: Additional offsets (e.g., for staggered grids)
+            
+        Returns:
+            tuple: (x, y, z) world coordinates in meters
+        """
+        grid_center_x, grid_center_y, grid_center_z = self._compute_grid_centers(grid)
+        x = ix * grid.dx - grid_center_x + offset_x
+        y = iy * grid.dy - grid_center_y + offset_y
+        z = iz * grid.dz - grid_center_z + offset_z
+        return x, y, z
     def band_limited_interpolation_mask(self, grid, element_idx, n_points_x=5, n_points_y=5, 
-                                       z0=0.0, staggered=False):
+                                       z0=0.0, staggered=False, kernel_radius=None):
         """Create a mask using band-limited interpolation for a single element.
         
         Based on band-limited interpolation method from https://doi.org/10.1121/1.5116132
@@ -118,10 +171,15 @@ class Transducer:
             n_points_y: Number of sample points along element height
             z0: Z-position of the transducer surface in meters
             staggered: If True, use staggered grid offsets (half-grid spacing)
+            kernel_radius: Sinc kernel radius in grid cells (default: 3)
+                          Larger values increase accuracy but also computation cost
             
         Returns:
             mask: Array of shape matching grid dimensions with interpolated weights
         """
+        if kernel_radius is None:
+            kernel_radius = self.DEFAULT_KERNEL_RADIUS
+            
         # Generate surface points for this element
         points = self.generate_element_surface_points(element_idx, n_points_x, n_points_y)
         
@@ -136,12 +194,6 @@ class Transducer:
         offset_y = grid.dy / 2.0 if staggered else 0.0
         offset_z = grid.dz / 2.0 if staggered else 0.0
         
-        # Compute grid center offsets to handle centered coordinate systems
-        # Assume grid is centered at origin in world coordinates
-        grid_center_x = (grid.nx - 1) * grid.dx / 2.0
-        grid_center_y = (grid.ny - 1) * grid.dy / 2.0
-        grid_center_z = (grid.nz - 1) * grid.dz / 2.0
-        
         # For each surface point, apply band-limited interpolation using sinc function
         # Sinc interpolation spreads point contribution to nearby grid cells
         weight_per_point = 1.0 / len(points)
@@ -150,12 +202,7 @@ class Transducer:
             px, py, pz = point
             
             # Convert world coordinates to grid indices (centered coordinate system)
-            ix_center = int(round((px + grid_center_x) / grid.dx))
-            iy_center = int(round((py + grid_center_y) / grid.dy))
-            iz_center = int(round((pz + grid_center_z) / grid.dz))
-            
-            # Define interpolation kernel radius (typically 3-5 grid cells)
-            kernel_radius = 3
+            ix_center, iy_center, iz_center = self._world_to_centered_grid_index(px, py, pz, grid)
             
             # Loop over neighborhood
             for ix in range(max(0, ix_center - kernel_radius), 
@@ -165,9 +212,9 @@ class Transducer:
                     for iz in range(max(0, iz_center - kernel_radius), 
                                   min(grid.nz, iz_center + kernel_radius + 1)):
                         # Grid cell center position (centered coordinate system)
-                        gx = ix * grid.dx - grid_center_x + offset_x
-                        gy = iy * grid.dy - grid_center_y + offset_y
-                        gz = iz * grid.dz - grid_center_z + offset_z
+                        gx, gy, gz = self._centered_grid_index_to_world(
+                            ix, iy, iz, grid, offset_x, offset_y, offset_z
+                        )
                         
                         # Distance in grid units
                         dist_x = (px - gx) / grid.dx
@@ -205,7 +252,7 @@ class Transducer:
         return float(result[0]) if is_scalar else result
 
     def create_element_masks(self, grid, z0=0.0, n_points_x=5, n_points_y=5, 
-                            staggered=False):
+                            staggered=False, kernel_radius=None):
         """Create masks for all transducer elements.
         
         Args:
@@ -214,6 +261,7 @@ class Transducer:
             n_points_x: Number of sample points along element width
             n_points_y: Number of sample points along element height
             staggered: If True, use staggered grid offsets
+            kernel_radius: Sinc kernel radius in grid cells (default: 3)
             
         Returns:
             masks: List of mask arrays, one for each element
@@ -221,7 +269,7 @@ class Transducer:
         masks = []
         for elem_idx in range(self.n_elements):
             mask = self.band_limited_interpolation_mask(
-                grid, elem_idx, n_points_x, n_points_y, z0, staggered
+                grid, elem_idx, n_points_x, n_points_y, z0, staggered, kernel_radius
             )
             masks.append(mask)
         return masks
