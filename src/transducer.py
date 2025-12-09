@@ -222,10 +222,10 @@ class Transducer:
                         dist_z = (pz - gz) / grid.dz
                         
                         # Band-limited sinc interpolation kernel
-                        # sinc(x) = sin(pi*x) / (pi*x), with sinc(0) = 1
-                        sinc_x = self._sinc(dist_x)
-                        sinc_y = self._sinc(dist_y)
-                        sinc_z = self._sinc(dist_z)
+                        # Using numpy's optimized sinc: sinc(x) = sin(pi*x) / (pi*x), with sinc(0) = 1
+                        sinc_x = np.sinc(dist_x)
+                        sinc_y = np.sinc(dist_y)
+                        sinc_z = np.sinc(dist_z)
                         
                         # Combined weight
                         weight = sinc_x * sinc_y * sinc_z * weight_per_point
@@ -233,27 +233,15 @@ class Transducer:
         
         return mask
 
-    def _sinc(self, x):
-        """Compute sinc function: sinc(x) = sin(pi*x) / (pi*x).
-        
-        Args:
-            x: Input value or array
-            
-        Returns:
-            sinc(x) with proper handling of x=0
-        """
-        is_scalar = np.isscalar(x)
-        x = np.atleast_1d(x)
-        result = np.ones_like(x, dtype=np.float64)
-        non_zero = np.abs(x) > 1e-10
-        if np.any(non_zero):
-            x_nz = x[non_zero]
-            result[non_zero] = np.sin(np.pi * x_nz) / (np.pi * x_nz)
-        return float(result[0]) if is_scalar else result
-
     def create_element_masks(self, grid, z0=0.0, n_points_x=5, n_points_y=5, 
                             staggered=False, kernel_radius=None):
         """Create masks for all transducer elements.
+        
+        Note: For large grids with many elements, this method can consume significant memory
+        (each mask is nx × ny × nz × 4 bytes). Consider:
+        - Computing masks on-demand if memory is limited
+        - Using sparse matrix representations for storage
+        - Reducing grid size or number of active elements
         
         Args:
             grid: Grid object defining the computational domain
