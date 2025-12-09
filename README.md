@@ -23,6 +23,28 @@ Lightweight, modular FDTD-based ultrasound RF data generator using Python + CuPy
 - The examples are intentionally small so they can run on limited GPUs. Increase sizes for realistic runs.
 - For 3D simulations, use small grids (e.g., 64³) and fp16 medium maps to reduce memory usage.
 
+## CUDA Setup (Multiple CUDA Versions):
+If you have multiple CUDA versions installed on your system, CuPy may have difficulty finding the correct CUDA libraries. This project includes automatic CUDA path detection in `src/cuda_setup.py` that runs before importing CuPy.
+
+The automatic detection will:
+1. Check if `CUDA_PATH` or `CUDA_HOME` environment variables are already set
+2. Search common CUDA installation directories (`/usr/local/cuda*`, `/opt/cuda*`)
+3. Select the newest CUDA version available
+4. Set appropriate environment variables (`CUDA_PATH`, `CUDA_HOME`, `LD_LIBRARY_PATH`)
+
+### Manual Override:
+If you want to use a specific CUDA version, set the `CUDA_PATH` environment variable before running your script:
+
+```bash
+export CUDA_PATH=/usr/local/cuda-11.8
+python examples/run_linear_probe.py
+```
+
+Or set it inline:
+```bash
+CUDA_PATH=/usr/local/cuda-11.8 python examples/run_linear_probe.py
+```
+
 ## Run an example:
 ```bash
 # 2D linear probe (nx=128, ny=1, nz=256)

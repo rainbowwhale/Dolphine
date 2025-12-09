@@ -1,5 +1,7 @@
 import time
 import numpy as np
+# Setup CUDA path before importing cupy to handle multiple CUDA versions
+import cuda_setup
 import cupy as cp
 
 
