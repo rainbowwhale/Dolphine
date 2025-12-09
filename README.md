@@ -42,10 +42,21 @@ python examples/run_multirow_demo.py
 The `Transducer` class now supports various array configurations:
 - **Single-row** (`n_rows=1`): Traditional linear arrays with elements along x-axis
 - **Multi-row** (`n_rows>1`): 1.5D or 1.75D arrays with elevation control
+  - Supports per-row element heights via `row_heights` parameter (e.g., `[1mm, 3mm, 5mm, 3mm, 1mm]`)
 - **2D matrix**: Full 2D element grid for volumetric imaging
 - **Custom geometry**: Override `element_positions` for curved/specialized arrays
 
 All transducers store 3D element positions (x, y, z) and include `element_height` attribute for physical dimensions.
+
+### Example: Multi-row array with varying heights
+```python
+# 5-row array where center row is tallest (1, 3, 5, 3, 1 mm)
+tx = Transducer(
+    n_elements=100, 
+    n_rows=5, 
+    row_heights=[0.001, 0.003, 0.005, 0.003, 0.001]
+)
+```
 
 # Dolphine
 FDTD simulator for medical ultrasound imaging with full 3D support

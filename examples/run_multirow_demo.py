@@ -56,8 +56,20 @@ def main():
     print(f"   - X position range: [{tx_matrix.element_positions[:, 0].min():.6f}, {tx_matrix.element_positions[:, 0].max():.6f}] m")
     print(f"   - Y position range: [{tx_matrix.element_positions[:, 1].min():.6f}, {tx_matrix.element_positions[:, 1].max():.6f}] m")
     
-    # Example 5: Focusing with multi-row array
-    print("\n5. Focusing demonstration")
+    # Example 5: Multi-row array with varying row heights (NEW FEATURE)
+    print("\n5. Multi-row array with varying row heights (5 rows: 1, 3, 5, 3, 1 mm)")
+    row_heights_mm = [1, 3, 5, 3, 1]  # Heights in mm
+    row_heights_m = [h / 1000.0 for h in row_heights_mm]  # Convert to meters
+    tx_varying = Transducer(n_elements=100, pitch=0.0003, n_rows=5, row_heights=row_heights_m)
+    print(f"   - Total elements: {tx_varying.n_elements}")
+    print(f"   - Number of rows: {tx_varying.n_rows}")
+    print(f"   - Elements per row: {tx_varying.n_elements // tx_varying.n_rows}")
+    print(f"   - Row heights: {[f'{h:.1f}' for h in (tx_varying.row_heights * 1000)]} mm")
+    print(f"   - Mean element height: {tx_varying.element_height * 1000:.2f} mm")
+    print(f"   - Position shape: {tx_varying.element_positions.shape}")
+    
+    # Example 6: Focusing with multi-row array
+    print("\n6. Focusing demonstration")
     print("   2D focus point (x, z) - backward compatible:")
     focus_2d = (0.0, 0.03)  # 3 cm depth, centered
     delays_2d = tx_2row.delays_for_focus(focus_2d)
@@ -70,8 +82,8 @@ def main():
     print(f"   - Focus point: x={focus_3d[0]:.3f} m, y={focus_3d[1]:.3f} m, z={focus_3d[2]:.3f} m")
     print(f"   - Delay range: [{delays_3d.min():.6e}, {delays_3d.max():.6e}] seconds")
     
-    # Example 6: Grid mapping
-    print("\n6. Grid mapping demonstration")
+    # Example 7: Grid mapping
+    print("\n7. Grid mapping demonstration")
     grid = Grid(nx=128, ny=64, nz=256, dx=1e-4)
     
     # Map single-row transducer
@@ -95,6 +107,7 @@ def main():
     print("✓ Multi-row arrays (n_rows>1) - 1.5D/1.75D arrays")
     print("✓ 2D matrix arrays - full 3D beam control")
     print("✓ Element height attribute for physical dimensions")
+    print("✓ Per-row element heights - each row can have different height")
     print("✓ 3D element positions (x, y, z) for all elements")
     print("✓ Backward compatible 2D focus points (x, z)")
     print("✓ Full 3D focus points (x, y, z) for elevation control")

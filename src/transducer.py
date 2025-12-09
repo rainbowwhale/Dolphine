@@ -8,16 +8,30 @@ class Transducer:
     
     Supports:
     - Single-row linear arrays (n_rows=1)
-    - Multi-row arrays (n_rows > 1)
+    - Multi-row arrays (n_rows > 1) with uniform or per-row element heights
     - 2D matrix arrays (configured via element_positions)
+    
+    Args:
+        n_elements: Total number of elements
+        pitch: Element spacing in azimuth direction (x-axis)
+        element_width: Physical width of each element
+        element_height: Default height for all elements (can be overridden by row_heights)
+        kerf: Gap between elements
+        center_freq: Center frequency in Hz
+        c: Speed of sound in m/s
+        n_rows: Number of rows for multi-row arrays
+        elevation_pitch: Element spacing in elevation direction (y-axis), defaults to pitch
+        row_heights: Optional per-row heights. Can be:
+            - None: all rows use element_height (default)
+            - Single value: all rows use this height
+            - List/array of n_rows values: each row has specific height (e.g., [0.001, 0.003, 0.005, 0.003, 0.001])
     """
 
     def __init__(self, n_elements=64, pitch=0.0003, element_width=0.00028, element_height=0.00028, 
-                 kerf=0.00002, center_freq=5e6, c=1540.0, n_rows=1, elevation_pitch=None):
+                 kerf=0.00002, center_freq=5e6, c=1540.0, n_rows=1, elevation_pitch=None, row_heights=None):
         self.n_elements = n_elements
         self.pitch = pitch
         self.element_width = element_width
-        self.element_height = element_height
         self.kerf = kerf
         self.center_freq = center_freq
         self.c = c
@@ -29,6 +43,24 @@ class Transducer:
         # Validate n_rows
         if n_rows < 1:
             raise ValueError("n_rows must be >= 1")
+        
+        # Handle row_heights: can be a single value or an array of heights per row
+        if row_heights is not None:
+            if isinstance(row_heights, (list, tuple, np.ndarray)):
+                # Array of heights per row
+                if len(row_heights) != n_rows:
+                    raise ValueError(f"row_heights length ({len(row_heights)}) must match n_rows ({n_rows})")
+                self.row_heights = np.array(row_heights)
+                # For backward compatibility, set element_height to the first row's height or mean
+                self.element_height = self.row_heights[0] if n_rows == 1 else np.mean(self.row_heights)
+            else:
+                # Single value for all rows
+                self.row_heights = np.full(n_rows, row_heights)
+                self.element_height = row_heights
+        else:
+            # Use element_height for all rows (backward compatible)
+            self.row_heights = np.full(n_rows, element_height)
+            self.element_height = element_height
         
         # Generate element center positions
         if n_rows == 1:
