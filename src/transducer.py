@@ -10,7 +10,7 @@ class Transducer:
     - Single-row linear arrays (n_rows=1)
     - Multi-row arrays (n_rows > 1) with uniform or per-row element heights
     - 2D matrix arrays (configured via element_positions)
-    - Convex/curved arrays (radius != None)
+    - Convex/curved arrays (radius != None, single-row only)
     
     Args:
         n_elements: Total number of elements
@@ -20,14 +20,14 @@ class Transducer:
         kerf: Gap between elements
         center_freq: Center frequency in Hz
         c: Speed of sound in m/s
-        n_rows: Number of rows for multi-row arrays
+        n_rows: Number of rows for multi-row arrays (must be 1 if radius is specified)
         elevation_pitch: Element spacing in elevation direction (y-axis), defaults to pitch
         row_heights: Optional per-row heights. Can be:
             - None: all rows use element_height (default)
             - Single value: all rows use this height
             - List/array of n_rows values: each row has specific height (e.g., [0.001, 0.003, 0.005, 0.003, 0.001])
-        radius: Radius of curvature for convex arrays (in meters). If provided, creates a convex array.
-        angle_span: Angular span for convex arrays in degrees (default 60). Only used if radius is specified.
+        radius: Radius of curvature for convex arrays (in meters, must be > 0). If provided, creates a convex array.
+        angle_span: Angular span for convex arrays in degrees (must be > 0, default 60). Only used if radius is specified.
     """
 
     def __init__(self, n_elements=64, pitch=0.0003, element_width=0.00028, element_height=0.00028, 
@@ -49,6 +49,15 @@ class Transducer:
         # Validate n_rows
         if n_rows < 1:
             raise ValueError("n_rows must be >= 1")
+        
+        # Validate convex array parameters
+        if radius is not None:
+            if radius <= 0:
+                raise ValueError(f"radius must be positive, got {radius}")
+            if angle_span <= 0:
+                raise ValueError(f"angle_span must be positive, got {angle_span}")
+            if n_rows > 1:
+                raise ValueError("Convex arrays (radius != None) do not support multi-row configuration (n_rows > 1)")
         
         # Handle row_heights: can be a single value or an array of heights per row
         if row_heights is not None:
