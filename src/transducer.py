@@ -82,13 +82,13 @@ class Transducer:
         if len(focus_point) == 2:
             # 2D focus point (x, z)
             dx = pos[:, 0] - focus_point[0]
-            dy = pos[:, 1] - 0.0
-            dz = focus_point[1] - 0.0
+            dy = pos[:, 1]
+            dz = focus_point[1]
         else:
             # 3D focus point (x, y, z)
             dx = pos[:, 0] - focus_point[0]
             dy = pos[:, 1] - focus_point[1]
-            dz = focus_point[2] - 0.0
+            dz = focus_point[2]
             
         distances = np.sqrt(dx ** 2 + dy ** 2 + dz ** 2)
         delays = distances / c
