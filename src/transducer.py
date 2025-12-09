@@ -153,7 +153,7 @@ class Transducer:
         Returns:
             tuple: (n_points_x, n_points_y) recommended number of sampling points
         """
-        # Nyquist criterion: need at least 2 samples per wavelength (grid spacing)
+        # Nyquist-Shannon sampling: need at least 2 samples per grid spacing unit
         # For BLI with error tolerance, use: n = ceil(element_size / grid_spacing) * factor
         # where factor depends on desired accuracy
         
@@ -313,12 +313,9 @@ class Transducer:
             sinc_y = np.sinc(dist_y)
             sinc_z = np.sinc(dist_z)
             
-            # Create 3D weight grid using outer products
-            # This is much faster than nested loops
-            weights_3d = np.outer(sinc_x, np.outer(sinc_y, sinc_z).ravel()).reshape(
-                len(ix_range), len(iy_range), len(iz_range)
-            )
-            weights_3d *= weight_per_point
+            # Create 3D weight grid using einsum (efficient and clear)
+            # einsum('i,j,k->ijk') computes outer product: sinc_x[:, None, None] * sinc_y[None, :, None] * sinc_z[None, None, :]
+            weights_3d = np.einsum('i,j,k->ijk', sinc_x, sinc_y, sinc_z) * weight_per_point
             
             # Add to mask
             mask[ix_min:ix_max, iy_min:iy_max, iz_min:iz_max] += weights_3d
