@@ -35,6 +35,7 @@ class SolverCore:
         # use fp32 for computation, even if medium maps are fp16
         self.p = cp.zeros(shape, dtype=cp.float32)
         self.vx = cp.zeros(shape, dtype=cp.float32)
+        self.vy = cp.zeros(shape, dtype=cp.float32)
         self.vz = cp.zeros(shape, dtype=cp.float32)
 
         # precompile kernel
@@ -45,21 +46,21 @@ class SolverCore:
         # with comments explaining shared memory/layout and mixed-precision handling.
         kernel_code = r'''
         extern "C" __global__ void update_step(
-            float* p, float* vx, float* vz,
+            float* p, float* vx, float* vy, float* vz,
             const unsigned short* rho_h, const unsigned short* c_h, const unsigned short* alpha_h,
-            int nx, int nz, float dx, float dz, float dt)
+            int nx, int ny, int nz, float dx, float dy, float dz, float dt)
         {
             /*
             Notes:
             - Host medium maps are passed as fp16 bitpatterns (unsigned short) to avoid
               relying on CUDA's half ABI. We reconstruct fp16 -> fp32 at load time.
-            - This kernel implements a 2D staggered-grid acoustic update: velocities (vx,vz)
+            - This kernel implements a 3D staggered-grid acoustic update: velocities (vx,vy,vz)
               updated from pressure gradient, then pressure from divergence.
-            - For optimization in real kernels, use 2D thread blocks, and copy a tile
+            - For optimization in real kernels, use 3D thread blocks, and copy a tile
               into shared memory to reuse neighbors. Here we illustrate the approach.
 
             Performance hints (to be used in real tuning):
-            - Use 2D block sizes like (16,16) so shared memory tile is contiguous.
+            - Use 3D block sizes like (8,8,8) so shared memory tile is contiguous.
             - Load medium properties into shared memory at tile halo.
             - Cast fp16 -> fp32 at load: __half h = __short_as_half(bits); float val = __half2float(h);
             - Use float4 vector loads when reading contiguous pressure samples for coalescing.
@@ -67,10 +68,11 @@ class SolverCore:
             */
 
             int ix = blockIdx.x * blockDim.x + threadIdx.x;
-            int iz = blockIdx.y * blockDim.y + threadIdx.y;
-            if (ix <= 0 || iz <= 0 || ix >= nx-1 || iz >= nz-1) return;
+            int iy = blockIdx.y * blockDim.y + threadIdx.y;
+            int iz = blockIdx.z * blockDim.z + threadIdx.z;
+            if (ix <= 0 || iy <= 0 || iz <= 0 || ix >= nx-1 || iy >= ny-1 || iz >= nz-1) return;
 
-            int idx = iz * nx + ix;
+            int idx = (iz * ny + iy) * nx + ix;
 
             // Reconstruct fp16 values stored in unsigned short arrays
             unsigned short rbits = rho_h[idx];
@@ -91,22 +93,27 @@ class SolverCore:
             float alpha = (float)abits;
 #endif
 
-            // load pressure neighbors
+            // load pressure neighbors for 3D
             float p_x1 = p[idx+1];
             float p_x0 = p[idx];
-            float p_z1 = p[idx+nx];
+            float p_y1 = p[idx+nx];
+            float p_y0 = p[idx];
+            float p_z1 = p[idx+nx*ny];
             float p_z0 = p[idx];
 
             // velocity update (finite diff)
             float dvx = -(dt / (rho * dx)) * (p_x1 - p_x0);
+            float dvy = -(dt / (rho * dy)) * (p_y1 - p_y0);
             float dvz = -(dt / (rho * dz)) * (p_z1 - p_z0);
             vx[idx] += dvx;
+            vy[idx] += dvy;
             vz[idx] += dvz;
 
             // divergence -> pressure update
             float vx_x = (vx[idx] - vx[idx-1]) / dx;
-            float vz_z = (vz[idx] - vz[idx-nx]) / dz;
-            float dp = - (rho * c * c) * dt * (vx_x + vz_z);
+            float vy_y = (vy[idx] - vy[idx-nx]) / dy;
+            float vz_z = (vz[idx] - vz[idx-nx*ny]) / dz;
+            float dp = - (rho * c * c) * dt * (vx_x + vy_y + vz_z);
 
             // simple attenuation (proportional damping)
             float damping = 1.0f / (1.0f + alpha * dt);
@@ -124,15 +131,15 @@ class SolverCore:
         """
         if dt is None:
             dt = self.grid.dt
-        nx, ny, nz = self.rho_gpu.shape[0], 1, self.rho_gpu.shape[1]
+        nx, ny, nz = self.rho_gpu.shape[0], self.rho_gpu.shape[1], self.rho_gpu.shape[2]
         # pack fp16 bit patterns into unsigned short arrays for kernel
         rho_bits = cp.asarray(self.rho_gpu.view(cp.uint16))
         c_bits = cp.asarray(self.c_gpu.view(cp.uint16))
         alpha_bits = cp.asarray(self.alpha_gpu.view(cp.uint16))
 
-        # pre-calc launch config
-        block = (16, 16, 1)
-        grid = ((nx + block[0] - 1) // block[0], (nz + block[1] - 1) // block[1], 1)
+        # pre-calc launch config for 3D
+        block = (8, 8, 8)
+        grid = ((nx + block[0] - 1) // block[0], (ny + block[1] - 1) // block[1], (nz + block[2] - 1) // block[2])
 
         # pre-upload source signal to device
         if source_signal is not None:
@@ -148,7 +155,8 @@ class SolverCore:
 
             # launch update kernel
             self.update_kernel(grid, block,
-                (self.p, self.vx, self.vz, rho_bits, c_bits, alpha_bits, nx, nz, float(self.grid.dx), float(self.grid.dz), float(dt)))
+                (self.p, self.vx, self.vy, self.vz, rho_bits, c_bits, alpha_bits, 
+                 nx, ny, nz, float(self.grid.dx), float(self.grid.dy), float(self.grid.dz), float(dt)))
 
         cp.cuda.Stream.null.synchronize()
         elapsed = time.time() - t0

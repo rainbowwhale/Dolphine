@@ -44,7 +44,7 @@ def main():
     sig, sr = tone_burst(center_freq=tx.center_freq, sampling_rate=int(fs), n_cycles=2)
 
     elem_idx = tx.map_to_grid(grid, z0=0.0)
-    src_positions = [iz * grid.nx + ix for (ix, _, iz) in elem_idx[::4]]
+    src_positions = [grid.to_linear_index(ix, iy, iz) for (ix, iy, iz) in elem_idx[::4]]
 
     solver = SolverCore(grid, (med.rho, med.c, med.alpha), dtype=np.float16)
 
@@ -52,7 +52,7 @@ def main():
     print(f"Convex simulation finished in {elapsed:.3f}s")
 
     p_np = solver.p.get()
-    img = np.abs(p_np.reshape(grid.nx, grid.nz).T)
+    img = np.max(np.abs(p_np.reshape(grid.nx, grid.ny, grid.nz)), axis=1).T
     env = envelope(img)
     db = log_compress(env)
     out_path = os.path.join(out_dir, 'convex_probe_mip.png')

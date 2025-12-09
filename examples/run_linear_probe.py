@@ -46,10 +46,10 @@ def main():
 
     # pick element center grid indices for injection
     elem_idx = tx.map_to_grid(grid, z0=0.0)
-    # convert (ix,iy,iz) to linear indices for solver's flattened layout (nx x nz)
+    # convert (ix,iy,iz) to linear indices for solver's flattened layout (nx x ny x nz)
     src_positions = []
-    for (ix, _, iz) in elem_idx[::4]:  # use every 4th element to reduce source count
-        src_positions.append(iz * grid.nx + ix)
+    for (ix, iy, iz) in elem_idx[::4]:  # use every 4th element to reduce source count
+        src_positions.append(grid.to_linear_index(ix, iy, iz))
 
     # get ROI from medium for small window (use whole for simplicity)
     rho, c, alpha = med.rho, med.c, med.alpha
@@ -66,8 +66,8 @@ def main():
     # simple RF gather: use pressure field snapshot and compute envelope
     p_np = solver.p.get()
     # collapse into (lateral x depth) frame for visualization (max across y)
-    img = np.max(np.abs(p_np.reshape(grid.nx, grid.nz).T), axis=2) if False else np.abs(p_np.reshape(grid.nx, grid.nz).T)
-    # compute envelope along time/depth axis; here depth acts like time
+    img = np.max(np.abs(p_np.reshape(grid.nx, grid.ny, grid.nz)), axis=1).T
+    # compute envelope along depth axis
     env = envelope(img)
     db = log_compress(env)
     out_path = os.path.join(out_dir, 'linear_probe_mip.png')
