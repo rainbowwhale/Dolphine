@@ -19,7 +19,7 @@ def build_convex_positions(n_elements, radius=0.05):
     # Arrange elements along an arc of given radius in x-z plane
     theta_span = np.deg2rad(60)
     thetas = np.linspace(-theta_span/2, theta_span/2, n_elements)
-    coords = np.stack([radius * np.sin(thetas), radius * (1 - np.cos(thetas))], axis=1)
+    coords = np.stack([radius * np.sin(thetas), np.zeros_like(thetas), radius * (1 - np.cos(thetas))], axis=1)
     return coords
 
 
