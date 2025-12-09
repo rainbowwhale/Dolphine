@@ -86,7 +86,7 @@ class Transducer:
         # Calculate number of points based on grid spacing if not provided
         if grid is not None and grid_aligned:
             # Use minimum grid spacing for point spacing (more conservative sampling)
-            min_grid_spacing = min(grid.dx, grid.dy, grid.dz)
+            min_grid_spacing = self._get_min_grid_spacing(grid)
             
             if n_points_x is None:
                 # Use minimum grid spacing to determine number of points
@@ -122,19 +122,13 @@ class Transducer:
             grid_center_x, grid_center_y, grid_center_z = self._compute_grid_centers(grid)
             
             if grid_center_only_x:
-                # Snap x coordinates to nearest grid center
-                x_indices = np.round((x_coords + grid_center_x) / grid.dx).astype(int)
-                x_coords = x_indices * grid.dx - grid_center_x
+                x_coords = self._snap_to_grid_center(x_coords, grid.dx, grid_center_x)
             
             if grid_center_only_y:
-                # Snap y coordinates to nearest grid center
-                y_indices = np.round((y_coords + grid_center_y) / grid.dy).astype(int)
-                y_coords = y_indices * grid.dy - grid_center_y
+                y_coords = self._snap_to_grid_center(y_coords, grid.dy, grid_center_y)
             
             if grid_center_only_z:
-                # Snap z coordinates to nearest grid center
-                z_indices = np.round((z_coords + grid_center_z) / grid.dz).astype(int)
-                z_coords = z_indices * grid.dz - grid_center_z
+                z_coords = self._snap_to_grid_center(z_coords, grid.dz, grid_center_z)
         
         points = np.stack([x_coords, y_coords, z_coords], axis=1)
         return points
@@ -200,7 +194,7 @@ class Transducer:
         if grid is not None:
             # Calculate based on element size and minimum grid spacing
             # Use minimum grid spacing for conservative sampling
-            min_grid_spacing = min(grid.dx, grid.dy, grid.dz)
+            min_grid_spacing = self._get_min_grid_spacing(grid)
             n_points_x = max(3, int(np.ceil(self.element_width / min_grid_spacing * factor)))
             n_points_y = max(3, int(np.ceil(self.element_height / min_grid_spacing * factor)))
         else:
@@ -208,13 +202,40 @@ class Transducer:
             # Use a heuristic: assume typical wavelength-based sampling
             # For ultrasound at typical frequencies (1-20 MHz) with c=1540 m/s,
             # wavelengths range from ~0.08mm to 1.5mm
-            # Use conservative estimate: assume finest expected grid spacing ~0.05mm (50 µm)
+            # Conservative estimate: 50µm (0.05mm) is ~1/2 of smallest typical wavelength (80µm at 20MHz)
+            # This ensures adequate sampling even for high-frequency applications
+            # May be overkill for low-frequency (1-5 MHz) but guarantees convergence
             assumed_min_spacing = 5e-5  # 50 micrometers
             
             n_points_x = max(3, int(np.ceil(self.element_width / assumed_min_spacing * factor)))
             n_points_y = max(3, int(np.ceil(self.element_height / assumed_min_spacing * factor)))
         
         return n_points_x, n_points_y
+
+    def _get_min_grid_spacing(self, grid):
+        """Get minimum grid spacing across all dimensions.
+        
+        Args:
+            grid: Grid object
+            
+        Returns:
+            float: Minimum of dx, dy, dz
+        """
+        return min(grid.dx, grid.dy, grid.dz)
+
+    def _snap_to_grid_center(self, coords, grid_spacing, grid_center):
+        """Snap coordinates to nearest grid center.
+        
+        Args:
+            coords: Array of coordinates to snap
+            grid_spacing: Grid spacing for this dimension
+            grid_center: Grid center offset for this dimension
+            
+        Returns:
+            Array of snapped coordinates
+        """
+        indices = np.round((coords + grid_center) / grid_spacing).astype(int)
+        return indices * grid_spacing - grid_center
 
     def _compute_grid_centers(self, grid):
         """Compute grid center offsets for centered coordinate system.
