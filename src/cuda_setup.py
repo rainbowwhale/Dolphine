@@ -11,10 +11,10 @@ from pathlib import Path
 
 
 def find_cuda_paths():
-    """Find all potential CUDA installation paths on the system.
+    """Find all existing CUDA installation paths on the system.
     
     Returns:
-        list: List of Path objects pointing to potential CUDA installations.
+        list of Path: List of Path objects pointing to existing CUDA installations.
     """
     cuda_paths = []
     
@@ -63,7 +63,7 @@ def get_cuda_version(cuda_path):
         cuda_path (Path): Path to CUDA installation.
         
     Returns:
-        tuple: (major, minor) version tuple, or None if version cannot be determined.
+        tuple of int or None: (major, minor) version tuple, or None if version cannot be determined.
     """
     version_file = cuda_path / 'version.txt'
     version_json = cuda_path / 'version.json'
@@ -143,6 +143,19 @@ def select_best_cuda_path(cuda_paths):
     return cuda_paths[0]
 
 
+def _add_to_ld_library_path(lib_path):
+    """Add a library path to LD_LIBRARY_PATH if not already present.
+    
+    Args:
+        lib_path (str): Library path to add.
+    """
+    if 'LD_LIBRARY_PATH' in os.environ:
+        if lib_path not in os.environ['LD_LIBRARY_PATH'].split(':'):
+            os.environ['LD_LIBRARY_PATH'] = f"{lib_path}:{os.environ['LD_LIBRARY_PATH']}"
+    else:
+        os.environ['LD_LIBRARY_PATH'] = lib_path
+
+
 def setup_cuda_path():
     """Detect and configure CUDA path for CuPy.
     
@@ -159,11 +172,7 @@ def setup_cuda_path():
         if cuda_path.exists() and (cuda_path / 'lib64').exists():
             # Also set LD_LIBRARY_PATH to help with runtime linking
             lib_path = str(cuda_path / 'lib64')
-            if 'LD_LIBRARY_PATH' in os.environ:
-                if lib_path not in os.environ['LD_LIBRARY_PATH'].split(':'):
-                    os.environ['LD_LIBRARY_PATH'] = f"{lib_path}:{os.environ['LD_LIBRARY_PATH']}"
-            else:
-                os.environ['LD_LIBRARY_PATH'] = lib_path
+            _add_to_ld_library_path(lib_path)
             return True
     
     # Find all CUDA installations
@@ -184,17 +193,16 @@ def setup_cuda_path():
         # Add CUDA lib directory to LD_LIBRARY_PATH
         lib_path = str(selected_path / 'lib64')
         if os.path.exists(lib_path):
-            if 'LD_LIBRARY_PATH' in os.environ:
-                if lib_path not in os.environ['LD_LIBRARY_PATH'].split(':'):
-                    os.environ['LD_LIBRARY_PATH'] = f"{lib_path}:{os.environ['LD_LIBRARY_PATH']}"
-            else:
-                os.environ['LD_LIBRARY_PATH'] = lib_path
+            _add_to_ld_library_path(lib_path)
         
         return True
     
     return False
 
 
-# Automatically setup CUDA path when this module is imported
-# This ensures CUDA is configured before CuPy is imported
+# Automatically setup CUDA path when this module is imported.
+# This ensures CUDA is configured before CuPy is imported in solver_core.py.
+# The auto-setup is designed to be safe: it respects existing CUDA_PATH settings
+# and only configures the environment if needed. For testing or manual control,
+# you can call setup_cuda_path() directly after importing this module.
 _cuda_configured = setup_cuda_path()
