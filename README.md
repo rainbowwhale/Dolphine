@@ -43,8 +43,10 @@ The `Transducer` class now supports various array configurations:
 - **Single-row** (`n_rows=1`): Traditional linear arrays with elements along x-axis
 - **Multi-row** (`n_rows>1`): 1.5D or 1.75D arrays with elevation control
   - Supports per-row element heights via `row_heights` parameter (e.g., `[1mm, 3mm, 5mm, 3mm, 1mm]`)
+- **Convex/curved** (`radius!=None`): Curved arrays with elements along an arc
+  - Specify `radius` (curvature radius in meters) and `angle_span` (angular span in degrees)
 - **2D matrix**: Full 2D element grid for volumetric imaging
-- **Custom geometry**: Override `element_positions` for curved/specialized arrays
+- **Custom geometry**: Override `element_positions` for specialized arrays
 
 All transducers store 3D element positions (x, y, z) and include `element_height` attribute for physical dimensions.
 
@@ -55,6 +57,17 @@ tx = Transducer(
     n_elements=100, 
     n_rows=5, 
     row_heights=[0.001, 0.003, 0.005, 0.003, 0.001]
+)
+```
+
+### Example: Convex array
+```python
+# Convex array with 45mm radius and 60 degree span
+tx = Transducer(
+    n_elements=32,
+    center_freq=3e6,
+    radius=0.045,
+    angle_span=60.0
 )
 ```
 

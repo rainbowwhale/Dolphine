@@ -15,14 +15,6 @@ from solver_core import SolverCore
 from utils.visualizer import envelope, log_compress, save_mip
 
 
-def build_convex_positions(n_elements, radius=0.05):
-    # Arrange elements along an arc of given radius in x-z plane
-    theta_span = np.deg2rad(60)
-    thetas = np.linspace(-theta_span/2, theta_span/2, n_elements)
-    coords = np.stack([radius * np.sin(thetas), np.zeros_like(thetas), radius * (1 - np.cos(thetas))], axis=1)
-    return coords
-
-
 def main():
     out_dir = os.path.join(os.path.dirname(__file__), '..', 'results')
     os.makedirs(out_dir, exist_ok=True)
@@ -32,9 +24,8 @@ def main():
 
     med = Medium((128, 1, 256), dtype=np.float16)
 
-    # Use Transducer but override positions to curved array
-    tx = Transducer(n_elements=32, pitch=0.0004, center_freq=3e6)
-    tx.element_positions = build_convex_positions(tx.n_elements, radius=0.045)
+    # Create convex transducer with native support
+    tx = Transducer(n_elements=32, pitch=0.0004, center_freq=3e6, radius=0.045, angle_span=60.0)
 
     # compute delays to a focal distance
     focus = (0.0, 0.05)
