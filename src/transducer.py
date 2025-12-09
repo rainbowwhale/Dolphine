@@ -27,7 +27,7 @@ class Transducer:
             - Single value: all rows use this height
             - List/array of n_rows values: each row has specific height (e.g., [0.001, 0.003, 0.005, 0.003, 0.001])
         radius: Radius of curvature for convex arrays (in meters, must be > 0). If provided, creates a convex array.
-        angle_span: Angular span for convex arrays in degrees (must be > 0, default 60). Only used if radius is specified.
+        angle_span: Angular span for convex arrays in degrees (must be > 0 and <= 180, default 60). Only used if radius is specified.
     """
 
     def __init__(self, n_elements=64, pitch=0.0003, element_width=0.00028, element_height=0.00028, 
@@ -54,8 +54,8 @@ class Transducer:
         if radius is not None:
             if radius <= 0:
                 raise ValueError(f"radius must be positive, got {radius}")
-            if angle_span <= 0:
-                raise ValueError(f"angle_span must be positive, got {angle_span}")
+            if angle_span <= 0 or angle_span > 180:
+                raise ValueError(f"angle_span must be positive and <= 180 degrees, got {angle_span}")
             if n_rows > 1:
                 raise ValueError("Convex arrays (radius != None) do not support multi-row configuration (n_rows > 1)")
         
@@ -80,11 +80,13 @@ class Transducer:
         # Generate element center positions
         if radius is not None:
             # Convex array: arrange elements along an arc in x-z plane
+            # Elements are distributed with uniform angular spacing across the arc
+            # Arc center is at origin (0, 0, 0) with elements positioned at positive z
             theta_span = np.deg2rad(angle_span)
             thetas = np.linspace(-theta_span/2, theta_span/2, n_elements)
             x_positions = radius * np.sin(thetas)
             y_positions = np.zeros_like(thetas)
-            z_positions = radius * (1 - np.cos(thetas))
+            z_positions = radius * (1 - np.cos(thetas))  # Positions arc forward (positive z direction)
         elif n_rows == 1:
             # Single-row linear array: positions along x-axis centered at zero
             x_positions = (np.arange(n_elements) - (n_elements - 1) / 2.0) * pitch
