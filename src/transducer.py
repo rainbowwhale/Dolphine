@@ -10,6 +10,7 @@ class Transducer:
     - Single-row linear arrays (n_rows=1)
     - Multi-row arrays (n_rows > 1) with uniform or per-row element heights
     - 2D matrix arrays (configured via element_positions)
+    - Convex/curved arrays (radius != None, single-row only)
     
     Args:
         n_elements: Total number of elements
@@ -19,16 +20,19 @@ class Transducer:
         kerf: Gap between elements
         center_freq: Center frequency in Hz
         c: Speed of sound in m/s
-        n_rows: Number of rows for multi-row arrays
+        n_rows: Number of rows for multi-row arrays (must be 1 if radius is specified)
         elevation_pitch: Element spacing in elevation direction (y-axis), defaults to pitch
         row_heights: Optional per-row heights. Can be:
             - None: all rows use element_height (default)
             - Single value: all rows use this height
             - List/array of n_rows values: each row has specific height (e.g., [0.001, 0.003, 0.005, 0.003, 0.001])
+        radius: Radius of curvature for convex arrays (in meters, must be > 0). If provided, creates a convex array.
+        angle_span: Angular span for convex arrays in degrees (must be > 0 and <= 180, default 60). Only used if radius is specified.
     """
 
     def __init__(self, n_elements=64, pitch=0.0003, element_width=0.00028, element_height=0.00028, 
-                 kerf=0.00002, center_freq=5e6, c=1540.0, n_rows=1, elevation_pitch=None, row_heights=None):
+                 kerf=0.00002, center_freq=5e6, c=1540.0, n_rows=1, elevation_pitch=None, row_heights=None,
+                 radius=None, angle_span=60.0):
         self.n_elements = n_elements
         self.pitch = pitch
         self.element_width = element_width
@@ -36,6 +40,8 @@ class Transducer:
         self.center_freq = center_freq
         self.c = c
         self.n_rows = n_rows
+        self.radius = radius
+        self.angle_span = angle_span
         
         # For multi-row arrays, use elevation_pitch if provided, otherwise use pitch
         self.elevation_pitch = elevation_pitch if elevation_pitch is not None else pitch
@@ -43,6 +49,15 @@ class Transducer:
         # Validate n_rows
         if n_rows < 1:
             raise ValueError("n_rows must be >= 1")
+        
+        # Validate convex array parameters
+        if radius is not None:
+            if radius <= 0:
+                raise ValueError(f"radius must be positive, got {radius}")
+            if angle_span <= 0 or angle_span > 180:
+                raise ValueError(f"angle_span must be positive and <= 180 degrees, got {angle_span}")
+            if n_rows > 1:
+                raise ValueError("Convex arrays (radius != None) do not support multi-row configuration (n_rows > 1)")
         
         # Handle row_heights: can be a single value or an array of heights per row
         if row_heights is not None:
@@ -63,7 +78,16 @@ class Transducer:
             self.element_height = element_height
         
         # Generate element center positions
-        if n_rows == 1:
+        if radius is not None:
+            # Convex array: arrange elements along an arc in x-z plane
+            # Elements are distributed with uniform angular spacing across the arc
+            # Arc center is at origin (0, 0, 0) with elements positioned at positive z
+            theta_span = np.deg2rad(angle_span)
+            thetas = np.linspace(-theta_span/2, theta_span/2, n_elements)
+            x_positions = radius * np.sin(thetas)
+            y_positions = np.zeros_like(thetas)
+            z_positions = radius * (1 - np.cos(thetas))  # Positions arc forward (positive z direction)
+        elif n_rows == 1:
             # Single-row linear array: positions along x-axis centered at zero
             x_positions = (np.arange(n_elements) - (n_elements - 1) / 2.0) * pitch
             y_positions = np.zeros_like(x_positions)
