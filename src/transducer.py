@@ -53,6 +53,9 @@ class Transducer:
         
         # Cache for BLI star (reusable across elements)
         self._bli_star_cache = {}
+        
+        # Cache for weight grid (reusable across elements to avoid reallocating)
+        self._weight_grid_cache = {}
 
     def delays_for_focus(self, focus_point, speed_of_sound=None):
         """Compute transmission delays for each element to focus at `focus_point` (x,z) in meters."""
@@ -239,11 +242,11 @@ class Transducer:
         
         n_points = points.shape[0]
         
-        # Use z0 for z-coordinate of points
+        # Use actual point coordinates (points[:, 2]), not z0 scalar
+        # Each point has its own z-coordinate
         px = (points[:, 0] - grid_origin_x) * inv_dx
         py = (points[:, 1] - grid_origin_y) * inv_dy
-        pz_scalar = (z0 - grid_origin_z) * inv_dz  # Scalar value since all points have same z
-        pz = xp.full(n_points, pz_scalar)  # Broadcast to array for consistency
+        pz = (points[:, 2] - grid_origin_z) * inv_dz  # Use points[:, 2], not z0!
         
         # ix = floor(px)
         ix = xp.floor(px).astype(int)  # Shape: (n_points,)
@@ -271,17 +274,13 @@ class Transducer:
         iy_all = iy[:, None] + bli_star_y[None, :]
         iz_all = iz[:, None] + bli_star_z[None, :]
         
-        # Use 3D array approach for efficient aggregation
-        # Create accumulation array
-        weight_grid = xp.zeros((grid.nx, grid.ny, grid.nz), dtype=xp.float32)
-        
         # Flatten all arrays for vectorized assignment
         ix_flat = ix_all.flatten()
         iy_flat = iy_all.flatten()
         iz_flat = iz_all.flatten()
         sinc_flat = sinc_all.flatten()
         
-        # Filter valid indices
+        # Filter valid indices (within grid bounds)
         valid_mask = (
             (ix_flat >= 0) & (ix_flat < grid.nx) &
             (iy_flat >= 0) & (iy_flat < grid.ny) &
@@ -293,29 +292,71 @@ class Transducer:
         iz_valid = iz_flat[valid_mask]
         sinc_valid = sinc_flat[valid_mask]
         
-        # Accumulate weights in 3D grid
+        # Use localized 3D array approach for memory efficiency
+        # Compute bounding box around element position (max range: element + ~11-12 grid cells)
+        # This avoids allocating full grid for large grids (e.g., 1000x1000x1000)
+        
+        if len(ix_valid) == 0:
+            # No valid points, return empty result
+            return np.array([], dtype=np.int32).reshape(0, 3), np.array([], dtype=np.float32)
+        
+        # Determine bounding box
+        ix_min = int(ix_valid.min() if use_gpu and HAS_CUPY else np.min(ix_valid))
+        ix_max = int(ix_valid.max() if use_gpu and HAS_CUPY else np.max(ix_valid))
+        iy_min = int(iy_valid.min() if use_gpu and HAS_CUPY else np.min(iy_valid))
+        iy_max = int(iy_valid.max() if use_gpu and HAS_CUPY else np.max(iy_valid))
+        iz_min = int(iz_valid.min() if use_gpu and HAS_CUPY else np.min(iz_valid))
+        iz_max = int(iz_valid.max() if use_gpu and HAS_CUPY else np.max(iz_valid))
+        
+        # Local subgrid dimensions
+        subgrid_nx = ix_max - ix_min + 1
+        subgrid_ny = iy_max - iy_min + 1
+        subgrid_nz = iz_max - iz_min + 1
+        
+        # Check cache for reusable weight_grid
+        cache_key = (subgrid_nx, subgrid_ny, subgrid_nz, use_gpu)
+        if cache_key in self._weight_grid_cache:
+            weight_grid_local = self._weight_grid_cache[cache_key]
+            # Zero out for reuse
+            weight_grid_local[:] = 0
+        else:
+            # Create new local weight grid
+            weight_grid_local = xp.zeros((subgrid_nx, subgrid_ny, subgrid_nz), dtype=xp.float32)
+            self._weight_grid_cache[cache_key] = weight_grid_local
+        
+        # Map global indices to local subgrid coordinates
+        ix_local = ix_valid - ix_min
+        iy_local = iy_valid - iy_min
+        iz_local = iz_valid - iz_min
+        
+        # Accumulate weights in local 3D grid
         # Use advanced indexing with add.at for accumulation (handles duplicates)
         if use_gpu and HAS_CUPY:
             # CuPy doesn't have add.at, use scatter_add
-            linear_indices = ix_valid + iy_valid * grid.nx + iz_valid * grid.nx * grid.ny
-            cp.scatter_add(weight_grid.flatten(), linear_indices, sinc_valid)
+            linear_indices = ix_local + iy_local * subgrid_nx + iz_local * subgrid_nx * subgrid_ny
+            cp.scatter_add(weight_grid_local.flatten(), linear_indices, sinc_valid)
         else:
-            np.add.at(weight_grid, (ix_valid, iy_valid, iz_valid), sinc_valid)
+            np.add.at(weight_grid_local, (ix_local, iy_local, iz_local), sinc_valid)
         
-        # Find non-zero cells
-        nonzero_mask = weight_grid != 0
+        # Find non-zero cells in local grid
+        nonzero_mask = weight_grid_local != 0
         if use_gpu and HAS_CUPY:
-            indices_i, indices_j, indices_k = cp.where(nonzero_mask)
-            weights = weight_grid[nonzero_mask]
+            indices_i_local, indices_j_local, indices_k_local = cp.where(nonzero_mask)
+            weights = weight_grid_local[nonzero_mask]
             
-            # Convert back to numpy
-            indices_i = cp.asnumpy(indices_i)
-            indices_j = cp.asnumpy(indices_j)
-            indices_k = cp.asnumpy(indices_k)
+            # Map back to global indices
+            indices_i = cp.asnumpy(indices_i_local) + ix_min
+            indices_j = cp.asnumpy(indices_j_local) + iy_min
+            indices_k = cp.asnumpy(indices_k_local) + iz_min
             weights = cp.asnumpy(weights)
         else:
-            indices_i, indices_j, indices_k = np.where(nonzero_mask)
-            weights = weight_grid[nonzero_mask]
+            indices_i_local, indices_j_local, indices_k_local = np.where(nonzero_mask)
+            weights = weight_grid_local[nonzero_mask]
+            
+            # Map back to global indices
+            indices_i = indices_i_local + ix_min
+            indices_j = indices_j_local + iy_min
+            indices_k = indices_k_local + iz_min
         
         indices = np.stack([indices_i, indices_j, indices_k], axis=1).astype(np.int32)
         weights = weights.astype(np.float32)
