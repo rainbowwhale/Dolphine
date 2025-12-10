@@ -174,8 +174,8 @@ class Transducer:
             offset_z = grid.dz / 2.0
         
         # Vectorized calculation per axis
-        # px = (points[:, 0] - grid.x_vec[0]) / grid.dx
-        px = (points_with_z[:, 0] + offset_x - grid_x_vec[0]) * inv_dx  # Shape: (n_points,)
+        # Shape: (n_points,) - vectorized coordinate transformation
+        px = (points_with_z[:, 0] + offset_x - grid_x_vec[0]) * inv_dx
         py = (points_with_z[:, 1] + offset_y - grid_y_vec[0]) * inv_dy
         pz = (points_with_z[:, 2] + offset_z - grid_z_vec[0]) * inv_dz
         
@@ -192,15 +192,15 @@ class Transducer:
         # Create BLI offset ranges: [-kernel_radius, ..., +kernel_radius]
         bli_range = xp.arange(-kernel_radius, kernel_radius + 1)  # Shape: (2*kernel_radius+1,)
         
-        # Compute sinc for all combinations: sinc(rx + bli_x)
-        # Broadcasting: (n_points, 1) + (1, bli_range) = (n_points, bli_range)
-        sinc_x_all = xp.sinc(rx[:, None] + bli_range[None, :])  # Shape: (n_points, 2*kr+1)
+        # Compute sinc for all combinations: sinc(rx + bli_offset)
+        # Broadcasting: (n_points, 1) + (1, 2*kernel_radius+1) = (n_points, 2*kernel_radius+1)
+        sinc_x_all = xp.sinc(rx[:, None] + bli_range[None, :])
         sinc_y_all = xp.sinc(ry[:, None] + bli_range[None, :])
         sinc_z_all = xp.sinc(rz[:, None] + bli_range[None, :])
         
-        # Generate indices for all points and bli offsets
-        # ix + bli_range: (n_points, 1) + (1, bli_range) = (n_points, bli_range)
-        ix_all = ix[:, None] + bli_range[None, :]  # Shape: (n_points, 2*kr+1)
+        # Generate indices for all points and BLI offsets
+        # Shape: (n_points, 2*kernel_radius+1)
+        ix_all = ix[:, None] + bli_range[None, :]
         iy_all = iy[:, None] + bli_range[None, :]
         iz_all = iz[:, None] + bli_range[None, :]
         
@@ -237,7 +237,7 @@ class Transducer:
                 continue
             
             # Create 3D weight grid using outer products (star pattern)
-            # weights_3d = sinc_x[:, None, None] * sinc_y[None, :, None] * sinc_z[None, None, :]
+            # Equivalent to: sinc_x_valid[:, None, None] * sinc_y_valid[None, :, None] * sinc_z_valid[None, None, :]
             weights_3d = xp.einsum('i,j,k->ijk', sinc_x_valid, sinc_y_valid, sinc_z_valid)
             
             # Create index meshgrid
