@@ -496,7 +496,7 @@ class Transducer1p5D(Transducer):
             row_pitch: Center-to-center spacing between rows (elevation, m)
             element_width: Width of each element (lateral, m)
             row_heights: List/array of heights for each row (elevation, m).
-                        If None, uses uniform height of 0.0004 * n_rows
+                        If None, uses uniform height of 0.4mm per row
             kerf: Gap between elements (m)
             center_freq: Center frequency (Hz)
             c: Speed of sound (m/s)
@@ -509,9 +509,10 @@ class Transducer1p5D(Transducer):
         
         # Set row heights
         if row_heights is None:
-            # Default: uniform height, total aperture ~ row_pitch * n_rows
-            default_height = 0.0004 * n_rows / n_rows  # Uniform distribution
-            self.row_heights = np.full(n_rows, default_height)
+            # Default: uniform height of 0.4mm per row
+            # This is a typical value for 1.5D arrays
+            DEFAULT_ROW_HEIGHT = 0.0004  # 0.4mm in meters
+            self.row_heights = np.full(n_rows, DEFAULT_ROW_HEIGHT)
         else:
             if len(row_heights) != n_rows:
                 raise ValueError(f"row_heights must have {n_rows} entries")
