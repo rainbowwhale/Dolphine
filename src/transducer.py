@@ -175,9 +175,14 @@ class Transducer:
         
         # Vectorized calculation per axis
         # Shape: (n_points,) - vectorized coordinate transformation
-        px = (points_with_z[:, 0] + offset_x - grid_x_vec[0]) * inv_dx
-        py = (points_with_z[:, 1] + offset_y - grid_y_vec[0]) * inv_dy
-        pz = (points_with_z[:, 2] + offset_z - grid_z_vec[0]) * inv_dz
+        # grid_origin represents the world coordinate of grid index 0
+        grid_origin_x = grid_x_vec[0]
+        grid_origin_y = grid_y_vec[0]
+        grid_origin_z = grid_z_vec[0]
+        
+        px = (points_with_z[:, 0] + offset_x - grid_origin_x) * inv_dx
+        py = (points_with_z[:, 1] + offset_y - grid_origin_y) * inv_dy
+        pz = (points_with_z[:, 2] + offset_z - grid_origin_z) * inv_dz
         
         # ix = floor(px)
         ix = xp.floor(px).astype(int)  # Shape: (n_points,)
@@ -262,7 +267,9 @@ class Transducer:
             
             # Aggregate weights for duplicate indices using linear indexing (per reviewer suggestion)
             # Convert 3D indices to linear indices for fast unique/aggregation
-            linear_indices = np.ravel_multi_index(indices.T, (grid.nx, grid.ny, grid.nz))
+            # Use tuple of arrays to avoid transpose copy
+            linear_indices = np.ravel_multi_index((indices[:, 0], indices[:, 1], indices[:, 2]), 
+                                                   (grid.nx, grid.ny, grid.nz))
             unique_linear_indices, inverse = np.unique(linear_indices, return_inverse=True)
             
             # Aggregate using bincount (efficient)

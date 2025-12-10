@@ -29,15 +29,22 @@ class Grid:
         self.z_vec = np.arange(nz) * self.dz - (nz - 1) * self.dz / 2.0
 
     def index_to_world(self, ix, iy, iz):
-        """Convert integer grid indices to world coordinates (meters)."""
-        x = ix * self.dx
-        y = iy * self.dy
-        z = iz * self.dz
+        """Convert integer grid indices to world coordinates (meters).
+        
+        Uses centered coordinate system consistent with axis vectors.
+        Grid center is at origin, with indices starting from 0.
+        """
+        x = ix * self.dx - (self.nx - 1) * self.dx / 2.0
+        y = iy * self.dy - (self.ny - 1) * self.dy / 2.0
+        z = iz * self.dz - (self.nz - 1) * self.dz / 2.0
         return x, y, z
 
     def world_to_index(self, x, y, z):
-        """Convert world coords to nearest grid index (integers)."""
-        ix = int(round(x / self.dx))
-        iy = int(round(y / self.dy))
-        iz = int(round(z / self.dz))
+        """Convert world coords to nearest grid index (integers).
+        
+        Uses centered coordinate system consistent with axis vectors.
+        """
+        ix = int(round((x + (self.nx - 1) * self.dx / 2.0) / self.dx))
+        iy = int(round((y + (self.ny - 1) * self.dy / 2.0) / self.dy))
+        iz = int(round((z + (self.nz - 1) * self.dz / 2.0) / self.dz))
         return ix, iy, iz
