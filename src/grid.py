@@ -8,6 +8,7 @@ class Grid:
         dx, dy, dz: spatial steps in meters
         nx, ny, nz: number of grid points
         dt: time step computed from CFL condition
+        x_vec, y_vec, z_vec: axis position vectors
     """
 
     def __init__(self, nx, ny, nz, dx=1e-4, dy=None, dz=None, c_max=1540.0, safety=0.5):
@@ -20,24 +21,30 @@ class Grid:
         # CFL-limited dt (scalar acoustic approx): dt <= safety * min(dx,dy,dz) / (c_max*sqrt(3))
         self.c_max = c_max
         self.dt = safety * min(self.dx, self.dy, self.dz) / (self.c_max * np.sqrt(3.0))
+        
+        # Axis vectors for vectorized BLI calculations
+        # Centered coordinate system: grid starts at origin, center is at (nx-1)*dx/2
+        self.x_vec = np.arange(nx) * self.dx - (nx - 1) * self.dx / 2.0
+        self.y_vec = np.arange(ny) * self.dy - (ny - 1) * self.dy / 2.0
+        self.z_vec = np.arange(nz) * self.dz - (nz - 1) * self.dz / 2.0
 
     def index_to_world(self, ix, iy, iz):
-        """Convert integer grid indices to world coordinates (meters)."""
-        x = ix * self.dx
-        y = iy * self.dy
-        z = iz * self.dz
+        """Convert integer grid indices to world coordinates (meters).
+        
+        Uses centered coordinate system consistent with axis vectors.
+        Grid center is at origin, with indices starting from 0.
+        """
+        x = ix * self.dx - (self.nx - 1) * self.dx / 2.0
+        y = iy * self.dy - (self.ny - 1) * self.dy / 2.0
+        z = iz * self.dz - (self.nz - 1) * self.dz / 2.0
         return x, y, z
 
     def world_to_index(self, x, y, z):
-        """Convert world coords to nearest grid index (integers)."""
-        ix = int(round(x / self.dx))
-        iy = int(round(y / self.dy))
-        iz = int(round(z / self.dz))
-        return ix, iy, iz
-
-    def to_linear_index(self, ix, iy, iz):
-        """Convert 3D grid indices (ix, iy, iz) to linear index for flattened 3D array.
+        """Convert world coords to nearest grid index (integers).
         
-        Uses row-major ordering: idx = (iz * ny + iy) * nx + ix
+        Uses centered coordinate system consistent with axis vectors.
         """
-        return (iz * self.ny + iy) * self.nx + ix
+        ix = int(round((x + (self.nx - 1) * self.dx / 2.0) / self.dx))
+        iy = int(round((y + (self.ny - 1) * self.dy / 2.0) / self.dy))
+        iz = int(round((z + (self.nz - 1) * self.dz / 2.0) / self.dz))
+        return ix, iy, iz

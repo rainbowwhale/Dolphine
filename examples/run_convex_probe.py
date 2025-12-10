@@ -15,6 +15,14 @@ from solver_core import SolverCore
 from utils.visualizer import envelope, log_compress, save_mip
 
 
+def build_convex_positions(n_elements, radius=0.05):
+    # Arrange elements along an arc of given radius in x-z plane
+    theta_span = np.deg2rad(60)
+    thetas = np.linspace(-theta_span/2, theta_span/2, n_elements)
+    coords = np.stack([radius * np.sin(thetas), radius * (1 - np.cos(thetas))], axis=1)
+    return coords
+
+
 def main():
     out_dir = os.path.join(os.path.dirname(__file__), '..', 'results')
     os.makedirs(out_dir, exist_ok=True)
@@ -24,8 +32,9 @@ def main():
 
     med = Medium((128, 1, 256), dtype=np.float16)
 
-    # Create convex transducer with native support
-    tx = Transducer(n_elements=32, pitch=0.0004, center_freq=3e6, radius=0.045, angle_span=60.0)
+    # Use Transducer but override positions to curved array
+    tx = Transducer(n_elements=32, pitch=0.0004, center_freq=3e6)
+    tx.element_positions = build_convex_positions(tx.n_elements, radius=0.045)
 
     # compute delays to a focal distance
     focus = (0.0, 0.05)
@@ -35,7 +44,7 @@ def main():
     sig, sr = tone_burst(center_freq=tx.center_freq, sampling_rate=int(fs), n_cycles=2)
 
     elem_idx = tx.map_to_grid(grid, z0=0.0)
-    src_positions = [grid.to_linear_index(ix, iy, iz) for (ix, iy, iz) in elem_idx[::4]]
+    src_positions = [iz * grid.nx + ix for (ix, _, iz) in elem_idx[::4]]
 
     solver = SolverCore(grid, (med.rho, med.c, med.alpha), dtype=np.float16)
 
@@ -43,7 +52,7 @@ def main():
     print(f"Convex simulation finished in {elapsed:.3f}s")
 
     p_np = solver.p.get()
-    img = np.max(np.abs(p_np.reshape(grid.nx, grid.ny, grid.nz)), axis=1).T
+    img = np.abs(p_np.reshape(grid.nx, grid.nz).T)
     env = envelope(img)
     db = log_compress(env)
     out_path = os.path.join(out_dir, 'convex_probe_mip.png')
