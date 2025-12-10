@@ -50,6 +50,9 @@ class Transducer:
         # Generate element center positions along x-axis centered at zero
         x_positions = (np.arange(n_elements) - (n_elements - 1) / 2.0) * pitch
         self.element_positions = np.stack([x_positions, np.zeros_like(x_positions)], axis=1)  # (x, z=0)
+        
+        # Cache for BLI star (reusable across elements)
+        self._bli_star_cache = {}
 
     def delays_for_focus(self, focus_point, speed_of_sound=None):
         """Compute transmission delays for each element to focus at `focus_point` (x,z) in meters."""
@@ -114,6 +117,54 @@ class Transducer:
         points = np.stack([x_coords, y_coords, z_coords], axis=1)
         return points
 
+    def _get_bli_star(self, kernel_radius, tolerance):
+        """
+        Compute and cache BLI star points based on tolerance.
+        
+        BLI star = meshgrid of bli_range for x, y, z dimensions.
+        Points are selected where bli_level = 1/(bli_x * bli_y * bli_z) <= tolerance.
+        
+        This is expensive for large kernels but reusable across all elements.
+        
+        Args:
+            kernel_radius: Sinc kernel radius in grid cells
+            tolerance: Weight threshold for selecting BLI star points
+            
+        Returns:
+            bli_star_x, bli_star_y, bli_star_z: 1D arrays of selected BLI offsets
+        """
+        cache_key = (kernel_radius, tolerance)
+        if cache_key in self._bli_star_cache:
+            return self._bli_star_cache[cache_key]
+        
+        # Create BLI range: [-kernel_radius, ..., +kernel_radius]
+        bli_range = np.arange(-kernel_radius, kernel_radius + 1)
+        
+        # Create meshgrid for BLI star
+        bli_star_x, bli_star_y, bli_star_z = np.meshgrid(bli_range, bli_range, bli_range, indexing='ij')
+        
+        # Compute BLI level: 1/(x * y * z)
+        # Avoid division by zero: set zero entries to large value
+        with np.errstate(divide='ignore', invalid='ignore'):
+            bli_level_x = np.where(bli_star_x != 0, 1.0 / np.abs(bli_star_x), 1.0)
+            bli_level_y = np.where(bli_star_y != 0, 1.0 / np.abs(bli_star_y), 1.0)
+            bli_level_z = np.where(bli_star_z != 0, 1.0 / np.abs(bli_star_z), 1.0)
+            bli_level = bli_level_x * bli_level_y * bli_level_z
+        
+        # Select points where bli_level <= tolerance
+        bli_selected = bli_level >= tolerance
+        
+        # Extract selected offsets
+        bli_star_x_selected = bli_star_x[bli_selected]
+        bli_star_y_selected = bli_star_y[bli_selected]
+        bli_star_z_selected = bli_star_z[bli_selected]
+        
+        # Cache result
+        result = (bli_star_x_selected, bli_star_y_selected, bli_star_z_selected)
+        self._bli_star_cache[cache_key] = result
+        
+        return result
+
     def band_limited_interpolation_weights(self, grid, points, z0=0.0, kernel_radius=3,
                                           staggered_component=None, tolerance=1e-3, use_gpu=False):
         """
@@ -122,14 +173,12 @@ class Transducer:
         Implements correct BLI formula from reference:
         weight(grid_node) = sinc((px - gx)/dx) * sinc((py - gy)/dy) * sinc((pz - gz)/dz)
         
-        Fully vectorized implementation as per feedback:
+        Fully vectorized implementation with BLI star pre-selection:
         - px = (points[:,0] - (grid.x_vec[0] + offset)) / grid.dx
         - ix = floor(px)
         - rx = px - ix
-        - sx = sinc(rx + bli_x) for bli_x in range(-kernel_radius, kernel_radius+1)
-        
-        This creates a "star" pattern (BLI star = bli_range_x * bli_range_y * bli_range_z).
-        Points in the BLI star are selected based on weight threshold (tolerance).
+        - BLI star is pre-computed and cached for reuse across elements
+        - Uses 3D array approach for efficient index/weight computation
         
         Args:
             grid: Grid object with axis vectors (x_vec, y_vec, z_vec)
@@ -162,9 +211,14 @@ class Transducer:
         inv_dy = 1.0 / grid.dy
         inv_dz = 1.0 / grid.dz
         
-        # Set z-coordinate
-        points_with_z = points.copy()
-        points_with_z[:, 2] = z0
+        # Get BLI star (pre-computed and cached)
+        bli_star_x, bli_star_y, bli_star_z = self._get_bli_star(kernel_radius, tolerance)
+        n_bli_points = len(bli_star_x)
+        
+        if use_gpu and HAS_CUPY:
+            bli_star_x = cp.asarray(bli_star_x)
+            bli_star_y = cp.asarray(bli_star_y)
+            bli_star_z = cp.asarray(bli_star_z)
         
         # Grid offsets for staggered components
         offset_x, offset_y, offset_z = 0.0, 0.0, 0.0
@@ -183,9 +237,13 @@ class Transducer:
         grid_origin_y = grid_y_vec[0] + offset_y
         grid_origin_z = grid_z_vec[0] + offset_z
         
-        px = (points_with_z[:, 0] - grid_origin_x) * inv_dx
-        py = (points_with_z[:, 1] - grid_origin_y) * inv_dy
-        pz = (points_with_z[:, 2] - grid_origin_z) * inv_dz
+        n_points = points.shape[0]
+        
+        # Use z0 for z-coordinate of points
+        px = (points[:, 0] - grid_origin_x) * inv_dx
+        py = (points[:, 1] - grid_origin_y) * inv_dy
+        pz_scalar = (z0 - grid_origin_z) * inv_dz  # Scalar value since all points have same z
+        pz = xp.full(n_points, pz_scalar)  # Broadcast to array for consistency
         
         # ix = floor(px)
         ix = xp.floor(px).astype(int)  # Shape: (n_points,)
@@ -197,107 +255,77 @@ class Transducer:
         ry = py - iy
         rz = pz - iz
         
-        # Create BLI offset ranges: [-kernel_radius, ..., +kernel_radius]
-        bli_range = xp.arange(-kernel_radius, kernel_radius + 1)  # Shape: (2*kernel_radius+1,)
+        # Compute sinc for all BLI star points
+        # Broadcasting: (n_points, 1) + (1, n_bli_points) = (n_points, n_bli_points)
+        sinc_x_all = xp.sinc(rx[:, None] + bli_star_x[None, :])  # Shape: (n_points, n_bli_points)
+        sinc_y_all = xp.sinc(ry[:, None] + bli_star_y[None, :])
+        sinc_z_all = xp.sinc(rz[:, None] + bli_star_z[None, :])
         
-        # Compute sinc for all combinations: sinc(rx + bli_offset)
-        # Broadcasting: (n_points, 1) + (1, 2*kernel_radius+1) = (n_points, 2*kernel_radius+1)
-        sinc_x_all = xp.sinc(rx[:, None] + bli_range[None, :])
-        sinc_y_all = xp.sinc(ry[:, None] + bli_range[None, :])
-        sinc_z_all = xp.sinc(rz[:, None] + bli_range[None, :])
+        # Compute 3D weights: sinc_x * sinc_y * sinc_z for each BLI star point
+        # Shape: (n_points, n_bli_points)
+        sinc_all = sinc_x_all * sinc_y_all * sinc_z_all
         
-        # Generate indices for all points and BLI offsets
-        # Shape: (n_points, 2*kernel_radius+1)
-        ix_all = ix[:, None] + bli_range[None, :]
-        iy_all = iy[:, None] + bli_range[None, :]
-        iz_all = iz[:, None] + bli_range[None, :]
+        # Generate indices for all points and BLI star offsets
+        # Shape: (n_points, n_bli_points)
+        ix_all = ix[:, None] + bli_star_x[None, :]
+        iy_all = iy[:, None] + bli_star_y[None, :]
+        iz_all = iz[:, None] + bli_star_z[None, :]
         
-        # Filter out-of-bounds indices and compute weights
-        indices_list = []
-        weights_list = []
+        # Use 3D array approach for efficient aggregation
+        # Create accumulation array
+        weight_grid = xp.zeros((grid.nx, grid.ny, grid.nz), dtype=xp.float32)
         
-        n_points = points_with_z.shape[0]
-        n_bli = len(bli_range)
+        # Flatten all arrays for vectorized assignment
+        ix_flat = ix_all.flatten()
+        iy_flat = iy_all.flatten()
+        iz_flat = iz_all.flatten()
+        sinc_flat = sinc_all.flatten()
         
-        # For each point, compute 3D kernel weights
-        for p_idx in range(n_points):
-            # Get valid index ranges for this point
-            ix_range = ix_all[p_idx]
-            iy_range = iy_all[p_idx]
-            iz_range = iz_all[p_idx]
-            
-            # Mask for valid indices
-            valid_x = (ix_range >= 0) & (ix_range < grid.nx)
-            valid_y = (iy_range >= 0) & (iy_range < grid.ny)
-            valid_z = (iz_range >= 0) & (iz_range < grid.nz)
-            
-            # Get valid indices
-            ix_valid = ix_range[valid_x]
-            iy_valid = iy_range[valid_y]
-            iz_valid = iz_range[valid_z]
-            
-            # Get corresponding sinc values
-            sinc_x_valid = sinc_x_all[p_idx, valid_x]
-            sinc_y_valid = sinc_y_all[p_idx, valid_y]
-            sinc_z_valid = sinc_z_all[p_idx, valid_z]
-            
-            if len(ix_valid) == 0 or len(iy_valid) == 0 or len(iz_valid) == 0:
-                continue
-            
-            # Create 3D weight grid using outer products (star pattern)
-            # Equivalent to: sinc_x_valid[:, None, None] * sinc_y_valid[None, :, None] * sinc_z_valid[None, None, :]
-            weights_3d = xp.einsum('i,j,k->ijk', sinc_x_valid, sinc_y_valid, sinc_z_valid)
-            
-            # Create index meshgrid
-            ix_grid, iy_grid, iz_grid = xp.meshgrid(ix_valid, iy_valid, iz_valid, indexing='ij')
-            
-            # Flatten
-            local_indices = xp.stack([ix_grid.flatten(), iy_grid.flatten(), iz_grid.flatten()], axis=1)
-            local_weights = weights_3d.flatten()
-            
-            # Select BLI star points based on tolerance (weight threshold)
-            # Only keep points where |weight| >= tolerance
-            weight_mask = xp.abs(local_weights) >= tolerance
-            local_indices = local_indices[weight_mask]
-            local_weights = local_weights[weight_mask]
-            
-            if len(local_weights) > 0:
-                indices_list.append(local_indices)
-                weights_list.append(local_weights)
+        # Filter valid indices
+        valid_mask = (
+            (ix_flat >= 0) & (ix_flat < grid.nx) &
+            (iy_flat >= 0) & (iy_flat < grid.ny) &
+            (iz_flat >= 0) & (iz_flat < grid.nz)
+        )
         
-        # Combine all points
-        if len(indices_list) > 0:
-            indices = xp.vstack(indices_list)
-            weights = xp.concatenate(weights_list)
-            
-            # Convert back to numpy if using GPU
-            if use_gpu and HAS_CUPY:
-                indices = cp.asnumpy(indices)
-                weights = cp.asnumpy(weights)
-            
-            # Aggregate weights for duplicate indices using linear indexing (per reviewer suggestion)
-            # Convert 3D indices to linear indices for fast unique/aggregation
-            # Use tuple of arrays to avoid transpose copy
-            linear_indices = np.ravel_multi_index((indices[:, 0], indices[:, 1], indices[:, 2]), 
-                                                   (grid.nx, grid.ny, grid.nz))
-            unique_linear_indices, inverse = np.unique(linear_indices, return_inverse=True)
-            
-            # Aggregate using bincount (efficient)
-            aggregated_weights = np.bincount(inverse, weights=weights).astype(np.float32)
-            
-            # Convert back to 3D indices
-            indices = np.vstack(np.unravel_index(unique_linear_indices, (grid.nx, grid.ny, grid.nz))).T
-            weights = aggregated_weights
-            
-            # Normalize so total weight sums to 1.0
-            weight_sum = weights.sum()
-            if weight_sum > 1e-10:
-                weights = weights / weight_sum
+        ix_valid = ix_flat[valid_mask]
+        iy_valid = iy_flat[valid_mask]
+        iz_valid = iz_flat[valid_mask]
+        sinc_valid = sinc_flat[valid_mask]
+        
+        # Accumulate weights in 3D grid
+        # Use advanced indexing with add.at for accumulation (handles duplicates)
+        if use_gpu and HAS_CUPY:
+            # CuPy doesn't have add.at, use scatter_add
+            linear_indices = ix_valid + iy_valid * grid.nx + iz_valid * grid.nx * grid.ny
+            cp.scatter_add(weight_grid.flatten(), linear_indices, sinc_valid)
         else:
-            indices = np.zeros((0, 3), dtype=np.int32)
-            weights = np.zeros(0, dtype=np.float32)
+            np.add.at(weight_grid, (ix_valid, iy_valid, iz_valid), sinc_valid)
         
-        return indices.astype(np.int32), weights.astype(np.float32)
+        # Find non-zero cells
+        nonzero_mask = weight_grid != 0
+        if use_gpu and HAS_CUPY:
+            indices_i, indices_j, indices_k = cp.where(nonzero_mask)
+            weights = weight_grid[nonzero_mask]
+            
+            # Convert back to numpy
+            indices_i = cp.asnumpy(indices_i)
+            indices_j = cp.asnumpy(indices_j)
+            indices_k = cp.asnumpy(indices_k)
+            weights = cp.asnumpy(weights)
+        else:
+            indices_i, indices_j, indices_k = np.where(nonzero_mask)
+            weights = weight_grid[nonzero_mask]
+        
+        indices = np.stack([indices_i, indices_j, indices_k], axis=1).astype(np.int32)
+        weights = weights.astype(np.float32)
+        
+        # Normalize so total weight sums to 1.0
+        weight_sum = weights.sum()
+        if weight_sum > 1e-10:
+            weights = weights / weight_sum
+        
+        return indices, weights
 
     def create_element_mask(self, grid, element_idx, n_points_x, n_points_y, z0=0.0,
                            kernel_radius=3, tolerance=1e-3, staggered_component=None, use_gpu=False):
