@@ -6,16 +6,16 @@ The transducer mask functionality implements band-limited interpolation for crea
 
 **Reference:** https://doi.org/10.1121/1.5116132
 
-## Recent Improvements
+## Key Features
 
-### Grid-Aligned Sampling
-Points are now sampled according to grid spacing (dx, dy, dz) for better interpolation accuracy and efficiency.
+### Correct BLI Formula
+Uses proper sinc interpolation: `weight = sinc((px-gx)/dx) * sinc((py-gy)/dy) * sinc((pz-gz)/dz)` per reference paper.
 
-### Error-Tolerance-Based Sampling
-The number of sampling points is automatically calculated based on desired error tolerance, eliminating manual tuning.
+### Sparse Representation
+Returns (indices, weights) tuples instead of dense 3D arrays for ~98% memory savings.
 
 ### Vectorized Implementation
-Optimized for large arrays using vectorized operations, suitable for 2D matrix probes with 10,000+ elements.
+Fully vectorized calculation using grid axis vectors for optimal performance.
 
 ## Key Concepts
 
@@ -28,17 +28,17 @@ Each transducer element is modeled as a rectangular surface with:
 
 ### Band-Limited Interpolation
 
-Instead of representing each element as a single point source, the mask approach:
-1. Samples points across the element surface (grid-aligned or uniform)
+Instead of representing each element as a single point source, the sparse mask approach:
+1. Samples points uniformly across the element surface
 2. Uses sinc interpolation to distribute each point's contribution onto nearby grid cells
-3. Creates a smooth spatial distribution that respects the Nyquist sampling theorem
-4. Automatically determines optimal sampling based on error tolerance
+3. Creates a "star" pattern spatial distribution as described in reference
+4. Returns only nonzero indices and weights (sparse format)
 
 ### Grid Configurations
 
-The implementation supports two grid types:
-- **Normal Grid**: Standard grid with cell centers at integer multiples of grid spacing
-- **Staggered Grid**: Half-cell offset for velocity components in staggered-grid FDTD schemes
+The implementation supports:
+- **Normal Grid**: Standard grid for pressure fields at cell centers
+- **Staggered Grid**: Half-cell offsets for velocity components (Vx, Vy, Vz) in FDTD Yee grids
 
 ## API Reference
 
@@ -64,197 +64,186 @@ Transducer(n_elements=64, pitch=0.0003, element_width=0.00028, kerf=0.00002,
 
 ##### generate_element_surface_points()
 
-Generate points on a rectangular element surface with optional grid alignment.
+Generate uniformly distributed points on rectangular element surface.
 
 ```python
 points = transducer.generate_element_surface_points(
     element_idx, 
-    n_points_x=None,  # Auto-calculated if grid provided
-    n_points_y=None,  # Auto-calculated if grid provided
-    grid=None,        # For automatic point spacing
-    grid_aligned=True # Align with grid spacing
+    n_points_x,
+    n_points_y
 )
 ```
 
 **Parameters:**
 - `element_idx` (int): Index of the element (0 to n_elements-1)
-- `n_points_x` (int, optional): Number of sample points along element width. Auto-calculated if None and grid provided.
-- `n_points_y` (int, optional): Number of sample points along element height. Auto-calculated if None and grid provided.
-- `grid` (Grid, optional): Grid object for automatic point spacing calculation
-- `grid_aligned` (bool): If True and grid provided, align points with grid spacing (default: True)
+- `n_points_x` (int): Number of sample points along element width
+- `n_points_y` (int): Number of sample points along element height
 
 **Returns:**
-- `points` (ndarray): Array of shape (n_points, 3) with (x, y, z) coordinates in meters
+- `points` (ndarray): Array of shape (n_points_x × n_points_y, 3) with (x, y, z) coordinates in meters
 
-**Examples:**
-
-Legacy uniform spacing:
+**Example:**
 ```python
 tx = Transducer(n_elements=32, element_width=0.00028, element_height=0.002)
 points = tx.generate_element_surface_points(element_idx=0, n_points_x=5, n_points_y=5)
-# points.shape = (25, 3)  # 5x5 = 25 points
+# points.shape = (25, 3)  # 5x5 = 25 points uniformly distributed
 ```
 
-New grid-aligned with auto-calculation:
-```python
-grid = Grid(nx=128, ny=64, nz=128, dx=1e-4)
-points = tx.generate_element_surface_points(element_idx=0, grid=grid, grid_aligned=True)
-# Points automatically calculated and aligned to grid spacing
-# Typically results in more points for better accuracy
-```
+##### band_limited_interpolation_weights()
 
-##### calculate_bli_points_for_error()
-
-**NEW**: Calculate the number of BLI sampling points needed for a given error tolerance.
+Compute BLI weights for source points using vectorized calculation.
 
 ```python
-n_points_x, n_points_y = transducer.calculate_bli_points_for_error(
+indices, weights = transducer.band_limited_interpolation_weights(
     grid, 
-    error_tolerance=0.01  # 1% error
+    points,
+    z0=0.0,
+    kernel_radius=3,
+    staggered_component=None,
+    use_gpu=False
 )
 ```
 
 **Parameters:**
-- `grid` (Grid): Grid object defining the computational domain
-- `error_tolerance` (float): Desired relative error tolerance (e.g., 0.01 for 1% error, 0.05 for 5% error)
+- `grid` (Grid): Grid object with axis vectors (x_vec, y_vec, z_vec)
+- `points` (ndarray): Array of (x, y, z) source point coordinates
+- `z0` (float): Z-position of transducer surface (meters)
+- `kernel_radius` (int): Sinc kernel radius in grid cells (default: 3)
+- `staggered_component` (str): None for pressure, 'x'/'y'/'z' for velocity components
+- `use_gpu` (bool): Use CuPy for GPU acceleration if available
 
 **Returns:**
-- `tuple`: (n_points_x, n_points_y) recommended number of sampling points
+- `indices` (ndarray): Array of shape (N, 3) with grid indices (i, j, k)
+- `weights` (ndarray): Array of shape (N,) with corresponding weights (normalized, sum=1.0)
 
-**Error Tolerance Guidelines:**
-- `0.001` (0.1% error): High accuracy, ~960 points for typical element
-- `0.01` (1% error): Good accuracy, ~540 points (recommended)
-- `0.05` (5% error): Moderate accuracy, ~240 points
-- `0.1` (10% error): Fast computation, ~150 points
+**Formula:**
+```
+weight = sinc((px - gx) / dx) * sinc((py - gy) / dy) * sinc((pz - gz) / dz)
+```
+where (px, py, pz) are point coordinates and (gx, gy, gz) are grid node positions.
+
+##### create_element_mask()
+
+Create sparse BLI mask for a single element.
+
+```python
+indices, weights = transducer.create_element_mask(
+    grid,
+    element_idx,
+    n_points_x,
+    n_points_y,
+    z0=0.0,
+    kernel_radius=3,
+    staggered_component=None,
+    use_gpu=False
+)
+```
+
+**Parameters:**
+- `grid` (Grid): Grid object
+- `element_idx` (int): Element index
+- `n_points_x` (int): Number of sample points along width
+- `n_points_y` (int): Number of sample points along height
+- `z0` (float): Z-position of transducer surface
+- `kernel_radius` (int): Sinc kernel radius (grid cells)
+- `staggered_component` (str): None, 'x', 'y', or 'z' for staggered grids
+- `use_gpu` (bool): Use GPU acceleration
+
+**Returns:**
+- `indices` (ndarray): (N, 3) array of grid indices
+- `weights` (ndarray): (N,) array of weights
 
 **Example:**
 ```python
 grid = Grid(nx=128, ny=64, nz=128, dx=1e-4)
 tx = Transducer(n_elements=32)
+indices, weights = tx.create_element_mask(grid, element_idx=0, n_points_x=5, n_points_y=5)
 
-# Calculate points for 1% error
-n_x, n_y = tx.calculate_bli_points_for_error(grid, error_tolerance=0.01)
-print(f"Need {n_x} × {n_y} = {n_x*n_y} points for 1% error")
+# Direct injection in simulation
+pressure[indices[:, 0], indices[:, 1], indices[:, 2]] += signal * weights
 ```
 
-##### generate_all_elements_surface_points()
+##### create_element_masks_staggered()
 
-Generate surface points for all transducer elements.
+Create staggered grid masks for velocity components.
 
 ```python
-points_list, element_indices = transducer.generate_all_elements_surface_points(
-    n_points_x=None,
-    n_points_y=None,
-    grid=None,
-    grid_aligned=True
+staggered_masks = transducer.create_element_masks_staggered(
+    grid,
+    element_idx,
+    n_points_x,
+    n_points_y,
+    z0=0.0,
+    kernel_radius=3,
+    use_gpu=False
 )
 ```
 
 **Parameters:**
-- `n_points_x` (int, optional): Number of sample points along element width
-- `n_points_y` (int, optional): Number of sample points along element height  
-- `grid` (Grid, optional): Grid object for automatic point spacing calculation
-- `grid_aligned` (bool): If True and grid provided, align points with grid spacing
+- `grid` (Grid): Grid object
+- `element_idx` (int): Element index
+- `n_points_x` (int): Number of sample points along width
+- `n_points_y` (int): Number of sample points along height
+- `z0` (float): Z-position of transducer surface
+- `kernel_radius` (int): Sinc kernel radius
+- `use_gpu` (bool): Use GPU acceleration
 
 **Returns:**
-- `points_list` (list): List of arrays, each containing points for one element
-- `element_indices` (list): List of element indices corresponding to each point set
+- `dict`: `{'vx': (indices, weights), 'vy': (indices, weights), 'vz': (indices, weights)}`
 
-##### band_limited_interpolation_mask()
+**Example:**
+```python
+staggered_masks = tx.create_element_masks_staggered(grid, element_idx=0, n_points_x=3, n_points_y=3)
 
-Create a mask using band-limited interpolation for a single element with vectorized optimization.
+vx_indices, vx_weights = staggered_masks['vx']
+vy_indices, vy_weights = staggered_masks['vy']
+vz_indices, vz_weights = staggered_masks['vz']
+
+# Use in FDTD simulation
+vx[vx_indices[:, 0], vx_indices[:, 1], vx_indices[:, 2]] += signal * vx_weights
+```
+
+##### create_all_element_masks()
+
+Create BLI masks for all elements.
 
 ```python
-mask = transducer.band_limited_interpolation_mask(
-    grid, 
-    element_idx, 
-    n_points_x=None,         # Auto-calculated if None
-    n_points_y=None,         # Auto-calculated if None
-    z0=0.0, 
+masks = transducer.create_all_element_masks(
+    grid,
+    n_points_x,
+    n_points_y,
+    z0=0.0,
+    kernel_radius=3,
     staggered=False,
-    kernel_radius=None,      # Default: 3
-    error_tolerance=None,    # NEW: Auto-calculate points
-    grid_aligned=True        # NEW: Grid-aligned sampling
+    use_gpu=False
 )
 ```
 
 **Parameters:**
-- `grid` (Grid): Grid object defining the computational domain
-- `element_idx` (int): Index of the element to create mask for
-- `n_points_x` (int, optional): Number of sample points along element width (auto if None)
-- `n_points_y` (int, optional): Number of sample points along element height (auto if None)
-- `z0` (float): Z-position of the transducer surface in meters
-- `staggered` (bool): If True, use staggered grid offsets (half-grid spacing)
-- `kernel_radius` (int, optional): Sinc kernel radius in grid cells (default: 3)
-- `error_tolerance` (float, optional): **NEW** - Auto-calculate n_points for this error level (e.g., 0.01)
-- `grid_aligned` (bool): **NEW** - If True, align sampling points with grid spacing (default: True)
+- `grid` (Grid): Grid object
+- `n_points_x` (int): Number of sample points along width per element
+- `n_points_y` (int): Number of sample points along height per element
+- `z0` (float): Z-position of transducer surface
+- `kernel_radius` (int): Sinc kernel radius
+- `staggered` (bool): If True, return staggered masks for velocity components
+- `use_gpu` (bool): Use GPU acceleration
 
 **Returns:**
-- `mask` (ndarray): Array of shape (grid.nx, grid.ny, grid.nz) with interpolated weights
-
-**Properties of the mask:**
-- Sum of all weights ≈ 1.0 (normalized)
-- Smooth spatial distribution using sinc interpolation
-- Non-zero values extend ~kernel_radius grid cells from source points
-- May have small negative lobes (characteristic of sinc function)
-- **Vectorized implementation for efficiency**
-
-**Examples:**
-
-Legacy API (still works):
-```python
-grid = Grid(nx=128, ny=64, nz=128, dx=1e-4)
-tx = Transducer(n_elements=32, element_width=0.00028)
-mask = tx.band_limited_interpolation_mask(grid, element_idx=0, n_points_x=5, n_points_y=5)
-# mask.shape = (128, 64, 128), np.sum(mask) ≈ 1.0
-```
-
-New API with error tolerance (recommended):
-```python
-# Automatically calculate points for 1% error and align to grid
-mask = tx.band_limited_interpolation_mask(
-    grid, element_idx=0, error_tolerance=0.01, grid_aligned=True
-)
-# Points are auto-calculated based on element size and grid spacing
-# Typically faster and more accurate than manual specification
-```
-
-##### create_element_masks()
-
-Create masks for all transducer elements.
-
-```python
-masks = transducer.create_element_masks(
-    grid, 
-    z0=0.0, 
-    n_points_x=5, 
-    n_points_y=5,
-    staggered=False
-)
-```
-
-**Parameters:**
-- `grid` (Grid): Grid object defining the computational domain
-- `z0` (float): Z-position of the transducer surface in meters
-- `n_points_x` (int): Number of sample points along element width
-- `n_points_y` (int): Number of sample points along element height
-- `staggered` (bool): If True, use staggered grid offsets
-
-**Returns:**
-- `masks` (list): List of mask arrays, one for each element
+- If `staggered=False`: list of `(indices, weights)` tuples
+- If `staggered=True`: list of dicts with 'vx', 'vy', 'vz' keys
 
 **Example:**
 ```python
-grid = Grid(nx=128, ny=64, nz=128, dx=1e-4)
-tx = Transducer(n_elements=32)
-masks = tx.create_element_masks(grid, z0=0.0, staggered=False)
-# len(masks) = 32
-# Each mask has shape (128, 64, 128)
+# Pressure field masks
+masks = tx.create_all_element_masks(grid, n_points_x=5, n_points_y=5, staggered=False)
+
+for elem_idx, (indices, weights) in enumerate(masks):
+    pressure[indices[:, 0], indices[:, 1], indices[:, 2]] += signal[elem_idx] * weights
 ```
 
 ## Usage Examples
 
-### Basic Mask Generation
+### Basic Sparse Mask Generation
 
 ```python
 from grid import Grid
@@ -264,34 +253,51 @@ from transducer import Transducer
 grid = Grid(nx=128, ny=64, nz=128, dx=1e-4)
 tx = Transducer(n_elements=32, pitch=0.0003, element_width=0.00028, element_height=0.002)
 
+# Generate sparse mask for one element
+indices, weights = tx.create_element_mask(grid, element_idx=0, n_points_x=5, n_points_y=5)
+
+# Direct injection in simulation
+for step in range(n_steps):
+    pressure[indices[:, 0], indices[:, 1], indices[:, 2]] += source_signal[step] * weights
+```
+
+### Multiple Elements
+
+```python
 # Generate masks for all elements
-masks = tx.create_element_masks(grid, z0=0.0, n_points_x=5, n_points_y=5, staggered=False)
+masks = tx.create_all_element_masks(grid, z0=0.0, n_points_x=5, n_points_y=5, staggered=False)
 
 # Use in source injection
 for step in range(n_steps):
-    for elem_idx, mask in enumerate(masks):
-        # Apply mask-weighted source injection
-        pressure_field += mask * source_signal[step] * apodization[elem_idx]
+    for elem_idx, (indices, weights) in enumerate(masks):
+        pressure[indices[:, 0], indices[:, 1], indices[:, 2]] += signal[step] * apodization[elem_idx] * weights
 ```
 
 ### Staggered Grid for Velocity Components
 
 ```python
-# For pressure field (normal grid)
-masks_pressure = tx.create_element_masks(grid, z0=0.0, staggered=False)
+# Get staggered masks for all velocity components
+staggered_masks = tx.create_element_masks_staggered(grid, element_idx=0, n_points_x=3, n_points_y=3)
 
-# For velocity components (staggered grid)
-masks_velocity = tx.create_element_masks(grid, z0=0.0, staggered=True)
+# Extract components
+vx_indices, vx_weights = staggered_masks['vx']
+vy_indices, vy_weights = staggered_masks['vy']
+vz_indices, vz_weights = staggered_masks['vz']
+
+# Use in FDTD
+vx_field[vx_indices[:, 0], vx_indices[:, 1], vx_indices[:, 2]] += signal * vx_weights
+vy_field[vy_indices[:, 0], vy_indices[:, 1], vy_indices[:, 2]] += signal * vy_weights
+vz_field[vz_indices[:, 0], vz_indices[:, 1], vz_indices[:, 2]] += signal * vz_weights
 ```
 
 ### Adjusting Sampling Density
 
 ```python
 # Lower sampling (faster, less accurate)
-masks_coarse = tx.create_element_masks(grid, n_points_x=3, n_points_y=3)
+indices_coarse, weights_coarse = tx.create_element_mask(grid, element_idx=0, n_points_x=3, n_points_y=3)
 
 # Higher sampling (slower, more accurate)
-masks_fine = tx.create_element_masks(grid, n_points_x=7, n_points_y=7)
+indices_fine, weights_fine = tx.create_element_mask(grid, element_idx=0, n_points_x=7, n_points_y=7)
 ```
 
 ## Performance Considerations
@@ -302,36 +308,45 @@ masks_fine = tx.create_element_masks(grid, n_points_x=7, n_points_y=7)
 - Recommended: 3-7 points per dimension for most applications
 - Total surface points = n_points_x × n_points_y
 
-### Computational Cost
+### Sparse Format Benefits
 
-The mask generation time scales with:
-- Number of surface points (n_points_x × n_points_y)
-- Grid size (nx × ny × nz)
-- Kernel radius (fixed at 3 cells)
+- Memory savings: ~98% vs dense arrays
+- Typical sparse mask: 0.026 MB vs dense: 1.0 MB (for 64³ grid)
+- Faster source injection (only update nonzero indices)
+
+### Computational Cost
 
 Pre-compute masks once before the time-stepping loop for best performance.
 
-### Memory Usage
+Mask generation time scales with:
+- Number of surface points (n_points_x × n_points_y)
+- Kernel radius (fixed at 3 cells)
+- Number of elements
 
-Each mask requires memory = nx × ny × nz × sizeof(float32)
+### GPU Acceleration
 
-For a 256×128×256 grid with 64 elements:
-- Per mask: ~33 MB
-- Total: ~2.1 GB
+```python
+# Use GPU for large arrays
+indices, weights = tx.create_element_mask(grid, element_idx=0, n_points_x=5, n_points_y=5, use_gpu=True)
+```
 
-Consider computing masks on-demand if memory is limited.
+Requires CuPy installation. Beneficial for:
+- Large grids (>256³)
+- Many elements (>100)
+- High sampling density (>10×10 points)
 
 ## Validation
 
 The implementation has been validated to ensure:
 
-1. **Normalization**: Sum of mask weights ≈ 1.0 (within ~10%)
-2. **Localization**: Non-zero weights confined to element vicinity
-3. **Smoothness**: Continuous spatial distribution via sinc interpolation
-4. **Grid alignment**: Proper handling of centered coordinate systems
-5. **Staggered support**: Correct half-cell offsets for staggered grids
+1. **Correct BLI formula**: Uses grid spacing (dx, dy, dz) in sinc denominators
+2. **Normalization**: Sum of weights = 1.0 exactly
+3. **Star pattern**: Creates characteristic sinc interpolation pattern
+4. **Sparse format**: Indices correspond correctly to grid positions
+5. **Staggered support**: Correct half-cell offsets for velocity components
+6. **Vectorization**: Efficient calculation using grid axis vectors
 
-See `examples/test_transducer_mask.py` for comprehensive validation tests.
+See `examples/test_corrected_bli.py` for comprehensive validation tests.
 
 ## References
 

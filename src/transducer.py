@@ -117,15 +117,21 @@ class Transducer:
     def band_limited_interpolation_weights(self, grid, points, z0=0.0, kernel_radius=3,
                                           staggered_component=None, use_gpu=False):
         """
-        Compute BLI weights for source points on grid.
+        Compute BLI weights for source points on grid using vectorized calculation.
         
         Implements correct BLI formula from reference:
         weight(grid_node) = sinc((px - gx)/dx) * sinc((py - gy)/dy) * sinc((pz - gz)/dz)
         
+        Fully vectorized implementation as per feedback:
+        - px = (points[:,0] - grid.x_vec[0]) / grid.dx
+        - ix = floor(px)
+        - rx = px - ix
+        - sx = sinc(rx + bli_x) for bli_x in range(-kernel_radius, kernel_radius+1)
+        
         This creates a "star" pattern as described in the reference paper.
         
         Args:
-            grid: Grid object defining computational domain
+            grid: Grid object with axis vectors (x_vec, y_vec, z_vec)
             points: Array of (x, y, z) source point coordinates
             z0: Z-position of transducer surface (m)
             kernel_radius: Sinc kernel radius in grid cells (e.g., 3 means -3 to +3)
@@ -140,8 +146,19 @@ class Transducer:
         if use_gpu and HAS_CUPY:
             xp = cp
             points = cp.asarray(points)
+            grid_x_vec = cp.asarray(grid.x_vec)
+            grid_y_vec = cp.asarray(grid.y_vec)
+            grid_z_vec = cp.asarray(grid.z_vec)
         else:
             xp = np
+            grid_x_vec = grid.x_vec
+            grid_y_vec = grid.y_vec
+            grid_z_vec = grid.z_vec
+        
+        # Pre-compute reciprocals for better performance (per reviewer suggestion)
+        inv_dx = 1.0 / grid.dx
+        inv_dy = 1.0 / grid.dy
+        inv_dz = 1.0 / grid.dz
         
         # Set z-coordinate
         points_with_z = points.copy()
@@ -156,56 +173,77 @@ class Transducer:
         elif staggered_component == 'z':
             offset_z = grid.dz / 2.0
         
-        # Grid center for coordinate conversion
-        grid_center_x = (grid.nx - 1) * grid.dx / 2.0
-        grid_center_y = (grid.ny - 1) * grid.dy / 2.0
-        grid_center_z = (grid.nz - 1) * grid.dz / 2.0
+        # Vectorized calculation per axis
+        # px = (points[:, 0] - grid.x_vec[0]) / grid.dx
+        px = (points_with_z[:, 0] + offset_x - grid_x_vec[0]) * inv_dx  # Shape: (n_points,)
+        py = (points_with_z[:, 1] + offset_y - grid_y_vec[0]) * inv_dy
+        pz = (points_with_z[:, 2] + offset_z - grid_z_vec[0]) * inv_dz
         
+        # ix = floor(px)
+        ix = xp.floor(px).astype(int)  # Shape: (n_points,)
+        iy = xp.floor(py).astype(int)
+        iz = xp.floor(pz).astype(int)
+        
+        # rx = px - ix (fractional part)
+        rx = px - ix  # Shape: (n_points,)
+        ry = py - iy
+        rz = pz - iz
+        
+        # Create BLI offset ranges: [-kernel_radius, ..., +kernel_radius]
+        bli_range = xp.arange(-kernel_radius, kernel_radius + 1)  # Shape: (2*kernel_radius+1,)
+        
+        # Compute sinc for all combinations: sinc(rx + bli_x)
+        # Broadcasting: (n_points, 1) + (1, bli_range) = (n_points, bli_range)
+        sinc_x_all = xp.sinc(rx[:, None] + bli_range[None, :])  # Shape: (n_points, 2*kr+1)
+        sinc_y_all = xp.sinc(ry[:, None] + bli_range[None, :])
+        sinc_z_all = xp.sinc(rz[:, None] + bli_range[None, :])
+        
+        # Generate indices for all points and bli offsets
+        # ix + bli_range: (n_points, 1) + (1, bli_range) = (n_points, bli_range)
+        ix_all = ix[:, None] + bli_range[None, :]  # Shape: (n_points, 2*kr+1)
+        iy_all = iy[:, None] + bli_range[None, :]
+        iz_all = iz[:, None] + bli_range[None, :]
+        
+        # Filter out-of-bounds indices and compute weights
         indices_list = []
         weights_list = []
         
-        for point in points_with_z:
-            px, py, pz = float(point[0]), float(point[1]), float(point[2])
+        n_points = points_with_z.shape[0]
+        n_bli = len(bli_range)
+        
+        # For each point, compute 3D kernel weights
+        for p_idx in range(n_points):
+            # Get valid index ranges for this point
+            ix_range = ix_all[p_idx]
+            iy_range = iy_all[p_idx]
+            iz_range = iz_all[p_idx]
             
-            # Convert to grid index (centered coordinate system)
-            ix_center = int(xp.round((px + grid_center_x) / grid.dx))
-            iy_center = int(xp.round((py + grid_center_y) / grid.dy))
-            iz_center = int(xp.round((pz + grid_center_z) / grid.dz))
+            # Mask for valid indices
+            valid_x = (ix_range >= 0) & (ix_range < grid.nx)
+            valid_y = (iy_range >= 0) & (iy_range < grid.ny)
+            valid_z = (iz_range >= 0) & (iz_range < grid.nz)
             
-            # Define kernel bounds
-            ix_min = max(0, ix_center - kernel_radius)
-            ix_max = min(grid.nx, ix_center + kernel_radius + 1)
-            iy_min = max(0, iy_center - kernel_radius)
-            iy_max = min(grid.ny, iy_center + kernel_radius + 1)
-            iz_min = max(0, iz_center - kernel_radius)
-            iz_max = min(grid.nz, iz_center + kernel_radius + 1)
+            # Get valid indices
+            ix_valid = ix_range[valid_x]
+            iy_valid = iy_range[valid_y]
+            iz_valid = iz_range[valid_z]
             
-            # Generate grid indices within kernel
-            ix_range = xp.arange(ix_min, ix_max)
-            iy_range = xp.arange(iy_min, iy_max)
-            iz_range = xp.arange(iz_min, iz_max)
+            # Get corresponding sinc values
+            sinc_x_valid = sinc_x_all[p_idx, valid_x]
+            sinc_y_valid = sinc_y_all[p_idx, valid_y]
+            sinc_z_valid = sinc_z_all[p_idx, valid_z]
             
-            # Compute grid node positions with staggered offset
-            gx = ix_range * grid.dx - grid_center_x + offset_x
-            gy = iy_range * grid.dy - grid_center_y + offset_y
-            gz = iz_range * grid.dz - grid_center_z + offset_z
+            if len(ix_valid) == 0 or len(iy_valid) == 0 or len(iz_valid) == 0:
+                continue
             
-            # Correct BLI formula: sinc((point_pos - grid_pos) / grid_spacing)
-            # KEY CORRECTION: Previously used element_width/height in denominator (WRONG!)
-            # Correct: use grid spacing (dx, dy, dz) in denominator
-            # Element size only determines NUMBER of sample points, not interpolation weights
-            # Reference: DOI 10.1121/1.5116132, section on band-limited interpolation
-            sinc_x = xp.sinc((px - gx) / grid.dx)
-            sinc_y = xp.sinc((py - gy) / grid.dy)
-            sinc_z = xp.sinc((pz - gz) / grid.dz)
+            # Create 3D weight grid using outer products (star pattern)
+            # weights_3d = sinc_x[:, None, None] * sinc_y[None, :, None] * sinc_z[None, None, :]
+            weights_3d = xp.einsum('i,j,k->ijk', sinc_x_valid, sinc_y_valid, sinc_z_valid)
             
-            # Create 3D weight grid: multiply sinc values (creates "star" pattern)
-            weights_3d = xp.einsum('i,j,k->ijk', sinc_x, sinc_y, sinc_z)
+            # Create index meshgrid
+            ix_grid, iy_grid, iz_grid = xp.meshgrid(ix_valid, iy_valid, iz_valid, indexing='ij')
             
-            # Create index grid
-            ix_grid, iy_grid, iz_grid = xp.meshgrid(ix_range, iy_range, iz_range, indexing='ij')
-            
-            # Flatten and combine
+            # Flatten
             local_indices = xp.stack([ix_grid.flatten(), iy_grid.flatten(), iz_grid.flatten()], axis=1)
             local_weights = weights_3d.flatten()
             
@@ -222,14 +260,16 @@ class Transducer:
                 indices = cp.asnumpy(indices)
                 weights = cp.asnumpy(weights)
             
-            # Aggregate weights for duplicate indices (multiple source points -> same grid cell)
-            # Use bincount for efficient aggregation
-            unique_indices, inverse = np.unique(indices, axis=0, return_inverse=True)
+            # Aggregate weights for duplicate indices using linear indexing (per reviewer suggestion)
+            # Convert 3D indices to linear indices for fast unique/aggregation
+            linear_indices = np.ravel_multi_index(indices.T, (grid.nx, grid.ny, grid.nz))
+            unique_linear_indices, inverse = np.unique(linear_indices, return_inverse=True)
             
-            # Convert to linear indices for bincount
+            # Aggregate using bincount (efficient)
             aggregated_weights = np.bincount(inverse, weights=weights).astype(np.float32)
             
-            indices = unique_indices
+            # Convert back to 3D indices
+            indices = np.vstack(np.unravel_index(unique_linear_indices, (grid.nx, grid.ny, grid.nz))).T
             weights = aggregated_weights
             
             # Normalize so total weight sums to 1.0
