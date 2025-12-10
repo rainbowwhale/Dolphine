@@ -1,31 +1,16 @@
-# Python cache files
+# Python cache
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+# Results directory (generated outputs)
+results/
 
-# Virtual environments
+# Virtual environment
 venv/
-ENV/
 env/
+ENV/
 
 # IDE
 .vscode/
@@ -33,12 +18,6 @@ env/
 *.swp
 *.swo
 *~
-
-# Results and output
-results/
-*.png
-*.jpg
-*.jpeg
 
 # OS
 .DS_Store
