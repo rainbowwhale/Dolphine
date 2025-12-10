@@ -115,7 +115,7 @@ class Transducer:
         return points
 
     def band_limited_interpolation_weights(self, grid, points, z0=0.0, kernel_radius=3,
-                                          staggered_component=None, use_gpu=False):
+                                          staggered_component=None, tolerance=1e-3, use_gpu=False):
         """
         Compute BLI weights for source points on grid using vectorized calculation.
         
@@ -123,12 +123,13 @@ class Transducer:
         weight(grid_node) = sinc((px - gx)/dx) * sinc((py - gy)/dy) * sinc((pz - gz)/dz)
         
         Fully vectorized implementation as per feedback:
-        - px = (points[:,0] - grid.x_vec[0]) / grid.dx
+        - px = (points[:,0] - (grid.x_vec[0] + offset)) / grid.dx
         - ix = floor(px)
         - rx = px - ix
         - sx = sinc(rx + bli_x) for bli_x in range(-kernel_radius, kernel_radius+1)
         
-        This creates a "star" pattern as described in the reference paper.
+        This creates a "star" pattern (BLI star = bli_range_x * bli_range_y * bli_range_z).
+        Points in the BLI star are selected based on weight threshold (tolerance).
         
         Args:
             grid: Grid object with axis vectors (x_vec, y_vec, z_vec)
@@ -136,6 +137,7 @@ class Transducer:
             z0: Z-position of transducer surface (m)
             kernel_radius: Sinc kernel radius in grid cells (e.g., 3 means -3 to +3)
             staggered_component: None for pressure (centered), 'x', 'y', or 'z' for velocity
+            tolerance: Weight threshold for selecting BLI star points (default: 1e-3)
             use_gpu: Use CuPy for GPU acceleration if available
             
         Returns:
@@ -176,13 +178,14 @@ class Transducer:
         # Vectorized calculation per axis
         # Shape: (n_points,) - vectorized coordinate transformation
         # grid_origin represents the world coordinate of grid index 0
-        grid_origin_x = grid_x_vec[0]
-        grid_origin_y = grid_y_vec[0]
-        grid_origin_z = grid_z_vec[0]
+        # For staggered grids, add offset to grid_origin (not to point position)
+        grid_origin_x = grid_x_vec[0] + offset_x
+        grid_origin_y = grid_y_vec[0] + offset_y
+        grid_origin_z = grid_z_vec[0] + offset_z
         
-        px = (points_with_z[:, 0] + offset_x - grid_origin_x) * inv_dx
-        py = (points_with_z[:, 1] + offset_y - grid_origin_y) * inv_dy
-        pz = (points_with_z[:, 2] + offset_z - grid_origin_z) * inv_dz
+        px = (points_with_z[:, 0] - grid_origin_x) * inv_dx
+        py = (points_with_z[:, 1] - grid_origin_y) * inv_dy
+        pz = (points_with_z[:, 2] - grid_origin_z) * inv_dz
         
         # ix = floor(px)
         ix = xp.floor(px).astype(int)  # Shape: (n_points,)
@@ -252,8 +255,15 @@ class Transducer:
             local_indices = xp.stack([ix_grid.flatten(), iy_grid.flatten(), iz_grid.flatten()], axis=1)
             local_weights = weights_3d.flatten()
             
-            indices_list.append(local_indices)
-            weights_list.append(local_weights)
+            # Select BLI star points based on tolerance (weight threshold)
+            # Only keep points where |weight| >= tolerance
+            weight_mask = xp.abs(local_weights) >= tolerance
+            local_indices = local_indices[weight_mask]
+            local_weights = local_weights[weight_mask]
+            
+            if len(local_weights) > 0:
+                indices_list.append(local_indices)
+                weights_list.append(local_weights)
         
         # Combine all points
         if len(indices_list) > 0:
@@ -290,7 +300,7 @@ class Transducer:
         return indices.astype(np.int32), weights.astype(np.float32)
 
     def create_element_mask(self, grid, element_idx, n_points_x, n_points_y, z0=0.0,
-                           kernel_radius=3, staggered_component=None, use_gpu=False):
+                           kernel_radius=3, tolerance=1e-3, staggered_component=None, use_gpu=False):
         """
         Create BLI mask for a single element.
         
@@ -301,6 +311,7 @@ class Transducer:
             n_points_y: Number of sample points along height
             z0: Z-position of transducer surface
             kernel_radius: Sinc kernel radius (grid cells)
+            tolerance: Weight threshold for BLI star point selection
             staggered_component: None, 'x', 'y', or 'z' for staggered grids
             use_gpu: Use GPU acceleration
             
@@ -313,13 +324,13 @@ class Transducer:
         
         # Compute BLI weights
         indices, weights = self.band_limited_interpolation_weights(
-            grid, points, z0, kernel_radius, staggered_component, use_gpu
+            grid, points, z0, kernel_radius, staggered_component, tolerance, use_gpu
         )
         
         return indices, weights
 
     def create_element_masks_staggered(self, grid, element_idx, n_points_x, n_points_y,
-                                      z0=0.0, kernel_radius=3, use_gpu=False):
+                                      z0=0.0, kernel_radius=3, tolerance=1e-3, use_gpu=False):
         """
         Create staggered grid masks for velocity components.
         
@@ -333,6 +344,7 @@ class Transducer:
             n_points_y: Number of sample points along height
             z0: Z-position of transducer surface
             kernel_radius: Sinc kernel radius
+            tolerance: Weight threshold for BLI star point selection
             use_gpu: Use GPU acceleration
             
         Returns:
@@ -345,14 +357,15 @@ class Transducer:
         masks = {}
         for component in ['x', 'y', 'z']:
             indices, weights = self.band_limited_interpolation_weights(
-                grid, points, z0, kernel_radius, staggered_component=component, use_gpu=use_gpu
+                grid, points, z0, kernel_radius, staggered_component=component, 
+                tolerance=tolerance, use_gpu=use_gpu
             )
             masks[f'v{component}'] = (indices, weights)
         
         return masks
 
     def create_all_element_masks(self, grid, n_points_x, n_points_y, z0=0.0,
-                                 kernel_radius=3, staggered=False, use_gpu=False):
+                                 kernel_radius=3, tolerance=1e-3, staggered=False, use_gpu=False):
         """
         Create BLI masks for all elements.
         
@@ -362,6 +375,7 @@ class Transducer:
             n_points_y: Number of sample points along height per element
             z0: Z-position of transducer surface
             kernel_radius: Sinc kernel radius
+            tolerance: Weight threshold for BLI star point selection
             staggered: If True, return staggered masks for velocity components
             use_gpu: Use GPU acceleration
             
@@ -374,11 +388,11 @@ class Transducer:
         for elem_idx in range(self.n_elements):
             if staggered:
                 mask = self.create_element_masks_staggered(
-                    grid, elem_idx, n_points_x, n_points_y, z0, kernel_radius, use_gpu
+                    grid, elem_idx, n_points_x, n_points_y, z0, kernel_radius, tolerance, use_gpu
                 )
             else:
                 mask = self.create_element_mask(
-                    grid, elem_idx, n_points_x, n_points_y, z0, kernel_radius, None, use_gpu
+                    grid, elem_idx, n_points_x, n_points_y, z0, kernel_radius, tolerance, None, use_gpu
                 )
             masks.append(mask)
         
