@@ -164,8 +164,6 @@ class Transducer:
         indices_list = []
         weights_list = []
         
-        # Note: No per-point normalization needed - sinc function properties ensure proper normalization
-        
         for point in points_with_z:
             px, py, pz = float(point[0]), float(point[1]), float(point[2])
             
@@ -193,7 +191,10 @@ class Transducer:
             gz = iz_range * grid.dz - grid_center_z + offset_z
             
             # Correct BLI formula: sinc((point_pos - grid_pos) / grid_spacing)
-            # This is the KEY correction from feedback
+            # KEY CORRECTION: Previously used element_width/height in denominator (WRONG!)
+            # Correct: use grid spacing (dx, dy, dz) in denominator
+            # Element size only determines NUMBER of sample points, not interpolation weights
+            # Reference: DOI 10.1121/1.5116132, section on band-limited interpolation
             sinc_x = xp.sinc((px - gx) / grid.dx)
             sinc_y = xp.sinc((py - gy) / grid.dy)
             sinc_z = xp.sinc((pz - gz) / grid.dz)
@@ -222,10 +223,11 @@ class Transducer:
                 weights = cp.asnumpy(weights)
             
             # Aggregate weights for duplicate indices (multiple source points -> same grid cell)
+            # Use bincount for efficient aggregation
             unique_indices, inverse = np.unique(indices, axis=0, return_inverse=True)
-            aggregated_weights = np.zeros(len(unique_indices), dtype=np.float32)
-            for i, weight in enumerate(weights):
-                aggregated_weights[inverse[i]] += weight
+            
+            # Convert to linear indices for bincount
+            aggregated_weights = np.bincount(inverse, weights=weights).astype(np.float32)
             
             indices = unique_indices
             weights = aggregated_weights
