@@ -104,10 +104,16 @@ class Transducer:
         center_x = self.element_positions[element_idx, 0]
         center_z = self.element_positions[element_idx, 1]
         
+        # Get element dimensions (support for variable height)
+        if hasattr(self, 'element_heights') and self.element_heights is not None:
+            elem_height = self.element_heights[element_idx]
+        else:
+            elem_height = self.element_height
+        
         # Generate uniform grid of points within element bounds
         # Use linspace with inclusive endpoints for uniform coverage
         x_samples = np.linspace(-self.element_width/2, self.element_width/2, n_points_x)
-        y_samples = np.linspace(-self.element_height/2, self.element_height/2, n_points_y)
+        y_samples = np.linspace(-elem_height/2, elem_height/2, n_points_y)
         
         # Create meshgrid
         xx, yy = np.meshgrid(x_samples, y_samples, indexing='xy')
@@ -466,6 +472,347 @@ class Transducer:
             masks.append(mask)
         
         return masks
+
+
+class Transducer1p5D(Transducer):
+    """1.5D Transducer with multiple rows (3-7 typical) and variable element heights.
+    
+    A 1.5D array has multiple rows of elements arranged in the elevation direction,
+    allowing electronic elevation focusing. Rows can have different heights for
+    optimized beam control.
+    
+    Element numbering: Elements are numbered sequentially across rows.
+    For a 3-row, 32-element-per-row array: elements 0-31 are row 0, 32-63 are row 1, etc.
+    """
+    
+    def __init__(self, n_elements_per_row=32, n_rows=None, pitch=0.0003, row_pitch=0.0004,
+                 element_width=0.00028, row_heights=None, kerf=0.00002,
+                 center_freq=5e6, c=1540.0):
+        """
+        Args:
+            n_elements_per_row: Number of elements in each row (lateral direction)
+            n_rows: Number of rows (elevation direction), typically 3-7.
+                   If row_heights is an array, n_rows is derived from its length.
+                   If row_heights is a scalar, n_rows must be provided.
+            pitch: Center-to-center spacing between elements in a row (lateral, m)
+            row_pitch: Center-to-center spacing between rows (elevation, m)
+            element_width: Width of each element (lateral, m)
+            row_heights: Height(s) for row(s) (elevation, m).
+                        Can be:
+                        - None: uses uniform height of 0.4mm for n_rows rows
+                        - Scalar (single value): uses this height uniformly for n_rows rows
+                        - Array: n_rows is derived from array length, each row gets its specified height
+            kerf: Gap between elements (m)
+            center_freq: Center frequency (Hz)
+            c: Speed of sound (m/s)
+        """
+        # Determine number of rows and row heights
+        if row_heights is None:
+            # No heights specified, use default uniform heights
+            if n_rows is None:
+                n_rows = 5  # Default to 5 rows
+            DEFAULT_ROW_HEIGHT = 0.0004  # 0.4mm in meters
+            self.row_heights = np.full(n_rows, DEFAULT_ROW_HEIGHT)
+            self.n_rows = n_rows
+        else:
+            # Heights are specified
+            row_heights_array = np.atleast_1d(row_heights)
+            
+            if row_heights_array.size == 1:
+                # Single height value provided
+                if n_rows is None:
+                    raise ValueError("n_rows must be specified when row_heights is a single value")
+                # Use the single height for all rows
+                self.row_heights = np.full(n_rows, float(row_heights_array[0]))
+                self.n_rows = n_rows
+            else:
+                # Array of heights provided - derive n_rows from length
+                self.row_heights = np.array(row_heights_array)
+                self.n_rows = len(self.row_heights)
+                # If n_rows was also provided, verify consistency
+                if n_rows is not None and n_rows != self.n_rows:
+                    raise ValueError(f"n_rows ({n_rows}) does not match length of row_heights array ({self.n_rows})")
+        
+        # Total number of elements
+        total_elements = n_elements_per_row * self.n_rows
+        
+        # Store configuration
+        self.n_elements_per_row = n_elements_per_row
+        self.row_pitch = row_pitch
+        
+        # Initialize base class with total elements and average height
+        avg_height = np.mean(self.row_heights)
+        super().__init__(
+            n_elements=total_elements,
+            pitch=pitch,
+            element_width=element_width,
+            kerf=kerf,
+            center_freq=center_freq,
+            c=c,
+            element_height=avg_height
+        )
+        
+        # Generate 2D element positions (x, y coordinates, z=0)
+        x_positions = (np.arange(n_elements_per_row) - (n_elements_per_row - 1) / 2.0) * pitch
+        y_positions = (np.arange(self.n_rows) - (self.n_rows - 1) / 2.0) * row_pitch
+        
+        # Create grid of positions
+        xx, yy = np.meshgrid(x_positions, y_positions, indexing='xy')
+        
+        # Flatten to create element_positions array (N_total, 2) for (x, z)
+        # Store as (x, y) in 3D space, z=0 for transducer surface
+        self.element_positions_2d = np.stack([xx.flatten(), yy.flatten()], axis=1)
+        
+        # Update element_positions for compatibility (keep x, set z=0)
+        self.element_positions = np.stack([xx.flatten(), np.zeros(total_elements)], axis=1)
+        
+        # Store per-element heights (map row index to height)
+        self.element_heights = np.repeat(self.row_heights, n_elements_per_row)
+    
+    def get_element_row_col(self, element_idx):
+        """Get the row and column indices for a given element index.
+        
+        Args:
+            element_idx: Linear element index (0 to n_elements-1)
+            
+        Returns:
+            (row_idx, col_idx): Row and column indices
+        """
+        row_idx = element_idx // self.n_elements_per_row
+        col_idx = element_idx % self.n_elements_per_row
+        return row_idx, col_idx
+    
+    def delays_for_focus_3d(self, focus_point, speed_of_sound=None):
+        """Compute transmission delays for 3D focus point (x, y, z) in meters.
+        
+        Args:
+            focus_point: Tuple (x, y, z) of focus point in meters
+            speed_of_sound: Speed of sound (m/s), uses self.c if None
+            
+        Returns:
+            delays: Array of delays for each element (seconds)
+        """
+        if speed_of_sound is None:
+            c = self.c
+        else:
+            c = speed_of_sound
+        
+        # Element positions in 3D (x, y, z=0)
+        dx = self.element_positions_2d[:, 0] - focus_point[0]
+        dy = self.element_positions_2d[:, 1] - focus_point[1]
+        dz = focus_point[2] - 0.0
+        
+        distances = np.sqrt(dx**2 + dy**2 + dz**2)
+        delays = distances / c
+        delays -= delays.min()
+        return delays
+    
+    def map_to_grid(self, grid, z0=0.0):
+        """Map element centers to grid indices (ix, iy, iz) using Grid object."""
+        idx = []
+        for i in range(self.n_elements):
+            x = self.element_positions_2d[i, 0]
+            y = self.element_positions_2d[i, 1]
+            ix, iy, iz = grid.world_to_index(x, y, z0)
+            idx.append((ix, iy, iz))
+        return idx
+    
+    def generate_element_surface_points(self, element_idx, n_points_x, n_points_y):
+        """Generate surface points for 1.5D element with variable height.
+        
+        Overrides parent method to use element-specific height from row.
+        """
+        if element_idx < 0 or element_idx >= self.n_elements:
+            raise ValueError(f"Element index {element_idx} out of range [0, {self.n_elements})")
+        
+        # Get element center position in 3D
+        center_x = self.element_positions_2d[element_idx, 0]
+        center_y = self.element_positions_2d[element_idx, 1]
+        center_z = 0.0
+        
+        # Get element-specific height
+        elem_height = self.element_heights[element_idx]
+        
+        # Generate uniform grid of points within element bounds
+        x_samples = np.linspace(-self.element_width/2, self.element_width/2, n_points_x)
+        y_samples = np.linspace(-elem_height/2, elem_height/2, n_points_y)
+        
+        # Create meshgrid
+        xx, yy = np.meshgrid(x_samples, y_samples, indexing='xy')
+        
+        # Flatten and offset by element center
+        x_coords = center_x + xx.flatten()
+        y_coords = center_y + yy.flatten()
+        z_coords = np.full_like(x_coords, center_z)
+        
+        points = np.stack([x_coords, y_coords, z_coords], axis=1)
+        return points
+
+
+class MatrixTransducer(Transducer):
+    """2D Matrix Transducer with uniform rectangular grid of elements.
+    
+    A 2D matrix array has tens to hundreds of rows and columns of elements,
+    allowing full 3D electronic beam steering and focusing. All elements have
+    the same size.
+    
+    Element numbering: Elements are numbered row-major order.
+    For a 16x16 array: elements 0-15 are row 0, 16-31 are row 1, etc.
+    """
+    
+    def __init__(self, n_elements_x=16, n_elements_y=16, pitch=0.0003,
+                 element_width=0.00028, element_height=0.00028, kerf=0.00002,
+                 center_freq=5e6, c=1540.0):
+        """
+        Args:
+            n_elements_x: Number of elements in x direction (lateral)
+            n_elements_y: Number of elements in y direction (elevation)
+            pitch: Center-to-center spacing between elements (m), same in both directions
+            element_width: Width of each element (x direction, m)
+            element_height: Height of each element (y direction, m)
+            kerf: Gap between elements (m)
+            center_freq: Center frequency (Hz)
+            c: Speed of sound (m/s)
+        """
+        # Total number of elements
+        total_elements = n_elements_x * n_elements_y
+        
+        # Store configuration
+        self.n_elements_x = n_elements_x
+        self.n_elements_y = n_elements_y
+        
+        # Initialize base class
+        super().__init__(
+            n_elements=total_elements,
+            pitch=pitch,
+            element_width=element_width,
+            kerf=kerf,
+            center_freq=center_freq,
+            c=c,
+            element_height=element_height
+        )
+        
+        # Generate 2D element positions (x, y coordinates, z=0)
+        x_positions = (np.arange(n_elements_x) - (n_elements_x - 1) / 2.0) * pitch
+        y_positions = (np.arange(n_elements_y) - (n_elements_y - 1) / 2.0) * pitch
+        
+        # Create grid of positions
+        xx, yy = np.meshgrid(x_positions, y_positions, indexing='xy')
+        
+        # Flatten to create element_positions array
+        self.element_positions_2d = np.stack([xx.flatten(), yy.flatten()], axis=1)
+        
+        # Update element_positions for compatibility
+        self.element_positions = np.stack([xx.flatten(), np.zeros(total_elements)], axis=1)
+        
+        # All elements have uniform height
+        self.element_heights = None  # Uniform, use self.element_height
+    
+    def get_element_row_col(self, element_idx):
+        """Get the row and column indices for a given element index.
+        
+        Args:
+            element_idx: Linear element index (0 to n_elements-1)
+            
+        Returns:
+            (row_idx, col_idx): Row and column indices
+        """
+        row_idx = element_idx // self.n_elements_x
+        col_idx = element_idx % self.n_elements_x
+        return row_idx, col_idx
+    
+    def delays_for_focus_3d(self, focus_point, speed_of_sound=None):
+        """Compute transmission delays for 3D focus point (x, y, z) in meters.
+        
+        Args:
+            focus_point: Tuple (x, y, z) of focus point in meters
+            speed_of_sound: Speed of sound (m/s), uses self.c if None
+            
+        Returns:
+            delays: Array of delays for each element (seconds)
+        """
+        if speed_of_sound is None:
+            c = self.c
+        else:
+            c = speed_of_sound
+        
+        # Element positions in 3D (x, y, z=0)
+        dx = self.element_positions_2d[:, 0] - focus_point[0]
+        dy = self.element_positions_2d[:, 1] - focus_point[1]
+        dz = focus_point[2] - 0.0
+        
+        distances = np.sqrt(dx**2 + dy**2 + dz**2)
+        delays = distances / c
+        delays -= delays.min()
+        return delays
+    
+    def delays_for_steering_3d(self, steering_angles, speed_of_sound=None):
+        """Compute transmission delays for 3D beam steering.
+        
+        Args:
+            steering_angles: Tuple (theta_x, theta_y) in radians
+                           theta_x: steering angle in x-z plane
+                           theta_y: steering angle in y-z plane
+            speed_of_sound: Speed of sound (m/s), uses self.c if None
+            
+        Returns:
+            delays: Array of delays for each element (seconds)
+        """
+        if speed_of_sound is None:
+            c = self.c
+        else:
+            c = speed_of_sound
+        
+        theta_x, theta_y = steering_angles
+        
+        # Compute delays based on plane wave steering
+        # delay = (x * sin(theta_x) + y * sin(theta_y)) / c
+        delays = (
+            self.element_positions_2d[:, 0] * np.sin(theta_x) +
+            self.element_positions_2d[:, 1] * np.sin(theta_y)
+        ) / c
+        
+        # Normalize to positive delays
+        delays -= delays.min()
+        return delays
+    
+    def map_to_grid(self, grid, z0=0.0):
+        """Map element centers to grid indices (ix, iy, iz) using Grid object."""
+        idx = []
+        for i in range(self.n_elements):
+            x = self.element_positions_2d[i, 0]
+            y = self.element_positions_2d[i, 1]
+            ix, iy, iz = grid.world_to_index(x, y, z0)
+            idx.append((ix, iy, iz))
+        return idx
+    
+    def generate_element_surface_points(self, element_idx, n_points_x, n_points_y):
+        """Generate surface points for matrix element.
+        
+        Overrides parent method to use 2D positions.
+        """
+        if element_idx < 0 or element_idx >= self.n_elements:
+            raise ValueError(f"Element index {element_idx} out of range [0, {self.n_elements})")
+        
+        # Get element center position in 3D
+        center_x = self.element_positions_2d[element_idx, 0]
+        center_y = self.element_positions_2d[element_idx, 1]
+        center_z = 0.0
+        
+        # Generate uniform grid of points within element bounds
+        x_samples = np.linspace(-self.element_width/2, self.element_width/2, n_points_x)
+        y_samples = np.linspace(-self.element_height/2, self.element_height/2, n_points_y)
+        
+        # Create meshgrid
+        xx, yy = np.meshgrid(x_samples, y_samples, indexing='xy')
+        
+        # Flatten and offset by element center
+        x_coords = center_x + xx.flatten()
+        y_coords = center_y + yy.flatten()
+        z_coords = np.full_like(x_coords, center_z)
+        
+        points = np.stack([x_coords, y_coords, z_coords], axis=1)
+        return points
 
 
 # Test the implementation
