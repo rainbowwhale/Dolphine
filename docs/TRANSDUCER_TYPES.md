@@ -49,31 +49,60 @@ delays = tx.delays_for_focus(focus)
 ## 2. 1.5D Transducer
 
 ### Description
-A 1.5D array has multiple rows (typically 3-7) in the elevation direction. Rows can have different heights, allowing for electronic elevation focusing while maintaining good sensitivity.
+A 1.5D array has multiple rows (typically 3-7, but can be more) in the elevation direction. Rows can have different heights, allowing for electronic elevation focusing while maintaining good sensitivity.
 
 ### Key Features
-- Multiple rows (3-7 typical)
+- Multiple rows (3-7 typical, but flexible)
 - Variable row heights for optimized beam profile
 - Electronic elevation focusing (no mechanical lens needed)
 - Fewer elements than full 2D matrix (cost-effective)
 - Good compromise between 1D and 2D arrays
 
 ### Usage
+
+**Method 1: Provide array of heights (n_rows derived automatically)**
 ```python
 from transducer import Transducer1p5D
 
-# Create with variable row heights (Gaussian profile)
-row_heights = [0.0003, 0.0004, 0.0005, 0.0004, 0.0003]  # meters
+# n_rows is automatically determined from array length
+row_heights = [0.0003, 0.0004, 0.0005, 0.0004, 0.0003]  # meters (5 rows)
 
 tx = Transducer1p5D(
-    n_elements_per_row=32,    # Elements in each row
-    n_rows=5,                 # Number of rows
-    pitch=0.0003,             # Lateral spacing (m)
-    row_pitch=0.0004,         # Elevation spacing (m)
-    row_heights=row_heights,  # Height per row (m)
-    center_freq=5e6           # Center frequency (Hz)
+    n_elements_per_row=32,
+    row_heights=row_heights,  # n_rows = 5 (from array length)
+    pitch=0.0003,
+    row_pitch=0.0004,
+    center_freq=5e6
 )
+```
 
+**Method 2: Specify n_rows for uniform heights**
+```python
+# All rows will have uniform default height (0.4mm)
+tx = Transducer1p5D(
+    n_elements_per_row=32,
+    n_rows=7,                 # 7 rows with uniform heights
+    pitch=0.0003,
+    row_pitch=0.0004,
+    center_freq=5e6
+)
+```
+
+**Method 3: Single height value with n_rows**
+```python
+# All rows will have the specified height
+tx = Transducer1p5D(
+    n_elements_per_row=32,
+    n_rows=5,
+    row_heights=0.0005,       # Single value: all rows get 0.5mm height
+    pitch=0.0003,
+    row_pitch=0.0004,
+    center_freq=5e6
+)
+```
+
+**Using the transducer:**
+```python
 # Compute 3D focusing delays
 focus = (0.0, 0.001, 0.03)  # (x, y, z) in meters
 delays = tx.delays_for_focus_3d(focus)
@@ -97,8 +126,9 @@ Elements are numbered sequentially across rows:
 
 **Number of Rows:**
 - 3 rows: Minimal elevation control, compact
-- 5 rows: Good elevation focusing, standard choice
-- 7 rows: Excellent elevation control, more complex
+- 5 rows: Good elevation focusing, standard choice (typical)
+- 7 rows: Excellent elevation control, more complex (typical)
+- 10+ rows: Advanced elevation control (supported, less common)
 
 ### Applications
 - Cardiac imaging (improved elevation resolution)
@@ -111,9 +141,9 @@ Elements are numbered sequentially across rows:
 import numpy as np
 
 # Gaussian profile (emphasis on center rows)
-n_rows = 5
+# n_rows is derived from the length of row_heights array
 sigma = 1.5
-row_indices = np.arange(n_rows) - (n_rows - 1) / 2
+row_indices = np.arange(5) - 2  # 5 rows: -2, -1, 0, 1, 2
 gaussian_weights = np.exp(-row_indices**2 / (2 * sigma**2))
 gaussian_weights /= gaussian_weights.max()
 
@@ -122,10 +152,17 @@ base_height = 0.0003  # 0.3mm
 max_height = 0.0005   # 0.5mm
 row_heights = base_height + (max_height - base_height) * gaussian_weights
 
+# n_rows is automatically 5 (from array length)
 tx = Transducer1p5D(
     n_elements_per_row=64,
-    n_rows=5,
-    row_heights=row_heights
+    row_heights=row_heights  # [0.3, 0.382, 0.5, 0.382, 0.3] mm
+)
+
+# For more rows, just create a longer array
+row_heights_10 = np.linspace(0.0003, 0.0005, 10)  # 10 rows
+tx_large = Transducer1p5D(
+    n_elements_per_row=64,
+    row_heights=row_heights_10  # n_rows = 10 automatically
 )
 ```
 

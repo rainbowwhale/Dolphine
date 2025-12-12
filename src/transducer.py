@@ -485,42 +485,59 @@ class Transducer1p5D(Transducer):
     For a 3-row, 32-element-per-row array: elements 0-31 are row 0, 32-63 are row 1, etc.
     """
     
-    def __init__(self, n_elements_per_row=32, n_rows=5, pitch=0.0003, row_pitch=0.0004,
+    def __init__(self, n_elements_per_row=32, n_rows=None, pitch=0.0003, row_pitch=0.0004,
                  element_width=0.00028, row_heights=None, kerf=0.00002,
                  center_freq=5e6, c=1540.0):
         """
         Args:
             n_elements_per_row: Number of elements in each row (lateral direction)
-            n_rows: Number of rows (elevation direction), typically 3-7
+            n_rows: Number of rows (elevation direction), typically 3-7.
+                   If row_heights is an array, n_rows is derived from its length.
+                   If row_heights is a scalar, n_rows must be provided.
             pitch: Center-to-center spacing between elements in a row (lateral, m)
             row_pitch: Center-to-center spacing between rows (elevation, m)
             element_width: Width of each element (lateral, m)
-            row_heights: List/array of heights for each row (elevation, m).
-                        If None, uses uniform height of 0.4mm per row
+            row_heights: Height(s) for row(s) (elevation, m).
+                        Can be:
+                        - None: uses uniform height of 0.4mm for n_rows rows
+                        - Scalar (single value): uses this height uniformly for n_rows rows
+                        - Array: n_rows is derived from array length, each row gets its specified height
             kerf: Gap between elements (m)
             center_freq: Center frequency (Hz)
             c: Speed of sound (m/s)
         """
-        if n_rows < 3 or n_rows > 7:
-            raise ValueError("1.5D transducers typically have 3-7 rows")
-        
-        # Total number of elements
-        total_elements = n_elements_per_row * n_rows
-        
-        # Set row heights
+        # Determine number of rows and row heights
         if row_heights is None:
-            # Default: uniform height of 0.4mm per row
-            # This is a typical value for 1.5D arrays
+            # No heights specified, use default uniform heights
+            if n_rows is None:
+                n_rows = 5  # Default to 5 rows
             DEFAULT_ROW_HEIGHT = 0.0004  # 0.4mm in meters
             self.row_heights = np.full(n_rows, DEFAULT_ROW_HEIGHT)
+            self.n_rows = n_rows
         else:
-            if len(row_heights) != n_rows:
-                raise ValueError(f"row_heights must have {n_rows} entries")
-            self.row_heights = np.array(row_heights)
+            # Heights are specified
+            row_heights_array = np.atleast_1d(row_heights)
+            
+            if row_heights_array.size == 1:
+                # Single height value provided
+                if n_rows is None:
+                    raise ValueError("n_rows must be specified when row_heights is a single value")
+                # Use the single height for all rows
+                self.row_heights = np.full(n_rows, float(row_heights_array[0]))
+                self.n_rows = n_rows
+            else:
+                # Array of heights provided - derive n_rows from length
+                self.row_heights = np.array(row_heights_array)
+                self.n_rows = len(self.row_heights)
+                # If n_rows was also provided, verify consistency
+                if n_rows is not None and n_rows != self.n_rows:
+                    raise ValueError(f"n_rows ({n_rows}) does not match length of row_heights array ({self.n_rows})")
+        
+        # Total number of elements
+        total_elements = n_elements_per_row * self.n_rows
         
         # Store configuration
         self.n_elements_per_row = n_elements_per_row
-        self.n_rows = n_rows
         self.row_pitch = row_pitch
         
         # Initialize base class with total elements and average height
@@ -537,7 +554,7 @@ class Transducer1p5D(Transducer):
         
         # Generate 2D element positions (x, y coordinates, z=0)
         x_positions = (np.arange(n_elements_per_row) - (n_elements_per_row - 1) / 2.0) * pitch
-        y_positions = (np.arange(n_rows) - (n_rows - 1) / 2.0) * row_pitch
+        y_positions = (np.arange(self.n_rows) - (self.n_rows - 1) / 2.0) * row_pitch
         
         # Create grid of positions
         xx, yy = np.meshgrid(x_positions, y_positions, indexing='xy')
