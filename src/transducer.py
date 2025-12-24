@@ -67,8 +67,9 @@ class Transducer:
         # For 1D arrays, y=0 for all elements
         self.element_positions_2d = np.stack([x_positions, np.zeros_like(x_positions)], axis=1)
         
-        # element_positions: Legacy (x, z=0) format for backward compatibility
-        self.element_positions = np.stack([x_positions, np.zeros_like(x_positions)], axis=1)
+        # element_positions: Legacy (x, z) format for backward compatibility with 2D focusing
+        # For the base class, both arrays have the same values but different semantic meaning
+        self.element_positions = self.element_positions_2d.copy()
         
         # Cache for BLI star (reusable across elements)
         self._bli_star_cache = {}
@@ -207,7 +208,7 @@ class Transducer:
         # Get element center position from element_positions_2d
         center_x = self.element_positions_2d[element_idx, 0]
         center_y = self.element_positions_2d[element_idx, 1]
-        center_z = 0.0  # Transducer surface at z=0
+        center_z = 0.0  # All transducer elements lie on the z=0 plane
         
         # Get element dimensions (support for variable height)
         if self.element_heights is not None:
@@ -668,10 +669,10 @@ class Transducer1p5D(Transducer):
         # Create grid of positions
         xx, yy = np.meshgrid(x_positions, y_positions, indexing='xy')
         
-        # Override element_positions_2d from base class
+        # Override element_positions_2d from base class with actual (x, y) positions
         self.element_positions_2d = np.stack([xx.flatten(), yy.flatten()], axis=1)
         
-        # Update element_positions for compatibility (keep x, set z=0)
+        # Update legacy element_positions (x, z=0 format) for backward compatibility
         self.element_positions = np.stack([xx.flatten(), np.zeros(total_elements)], axis=1)
         
         # Store per-element heights (map row index to height)
@@ -728,10 +729,10 @@ class MatrixTransducer(Transducer):
         # Create grid of positions
         xx, yy = np.meshgrid(x_positions, y_positions, indexing='xy')
         
-        # Override element_positions_2d from base class
+        # Override element_positions_2d from base class with actual (x, y) positions
         self.element_positions_2d = np.stack([xx.flatten(), yy.flatten()], axis=1)
         
-        # Update element_positions for compatibility
+        # Update legacy element_positions (x, z=0 format) for backward compatibility
         self.element_positions = np.stack([xx.flatten(), np.zeros(total_elements)], axis=1)
         
         # All elements have uniform height (use self.element_height from base)
