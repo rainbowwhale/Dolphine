@@ -303,7 +303,7 @@ class Transducer:
         # Prefer SciPy's recommended Hann window implementation when available,
         # but fall back to NumPy's deprecated np.hanning for backward compatibility.
         if HAS_SCIPY_WINDOWS:
-            return signal_windows.hann(self.n_elements, sym=True)
+            return signal_windows.hann(self.n_elements)
         else:
             return np.hanning(self.n_elements)
 
