@@ -16,6 +16,13 @@ Unified design:
 - Configurable element layout via element_positions parameter
 """
 import numpy as np
+import warnings
+
+try:
+    from scipy.signal import windows as signal_windows
+    HAS_SCIPY_WINDOWS = True
+except ImportError:
+    HAS_SCIPY_WINDOWS = False
 
 try:
     import cupy as cp
@@ -37,6 +44,8 @@ class Transducer:
     Includes band-limited interpolation (BLI) for distributed source injection.
     Reference: https://doi.org/10.1121/1.5116132
     """
+    # Default configuration constants
+    DEFAULT_ROW_HEIGHT = 0.0004  # Default row height in meters (0.4mm) for 1.5D arrays
     
     def __init__(self, n_elements=64, pitch=0.0003, element_width=0.00028, kerf=0.00002,
                  center_freq=5e6, c=1540.0, element_height=0.010,
@@ -94,15 +103,16 @@ class Transducer:
                 n_rows = len(self.row_heights)
             n_elements_y = n_rows
             self.n_rows = n_rows
-            # Generate per-element heights from row_heights
+            # Generate per-element heights from row_heights.
+            # Note: element_heights here represents heights derived from row_heights
+            # (all elements in a row get the same height), not custom per-element heights.
             if n_elements_x is not None:
                 element_heights = np.repeat(self.row_heights, n_elements_x)
         elif n_rows is not None:
             n_elements_y = n_rows
             self.n_rows = n_rows
             # Default row heights
-            DEFAULT_ROW_HEIGHT = 0.0004  # 0.4mm
-            self.row_heights = np.full(n_rows, DEFAULT_ROW_HEIGHT)
+            self.row_heights = np.full(n_rows, self.DEFAULT_ROW_HEIGHT)
             if n_elements_x is not None:
                 element_heights = np.repeat(self.row_heights, n_elements_x)
         
@@ -236,8 +246,9 @@ class Transducer:
     def delays_for_focus_3d(self, focus_point, speed_of_sound=None):
         """Compute transmission delays for 3D focus point (x, y, z) in meters.
         
-        Note: This method is now an alias for delays_for_focus(), which accepts
-        both 2D (x, z) and 3D (x, y, z) focus points. Prefer using delays_for_focus().
+        .. deprecated::
+            This method is deprecated and will be removed in a future version.
+            Use delays_for_focus() instead, which accepts both 2D (x, z) and 3D (x, y, z) focus points.
         
         Args:
             focus_point: Tuple (x, y, z) of focus point in meters
@@ -246,6 +257,12 @@ class Transducer:
         Returns:
             delays: Array of delays for each element (seconds)
         """
+        warnings.warn(
+            "delays_for_focus_3d() is deprecated. Use delays_for_focus() instead, "
+            "which accepts both 2D and 3D focus points.",
+            DeprecationWarning,
+            stacklevel=2
+        )
         return self.delays_for_focus(focus_point, speed_of_sound)
 
     def delays_for_steering_3d(self, steering_angles, speed_of_sound=None):
@@ -283,9 +300,12 @@ class Transducer:
 
     def apodization_hanning(self):
         """Return Hanning apodization weights across elements."""
-        # Note: np.hanning is deprecated since NumPy 1.25, but we maintain
-        # compatibility with older NumPy versions. The window is identical.
-        return np.hanning(self.n_elements)
+        # Prefer SciPy's recommended Hann window implementation when available,
+        # but fall back to NumPy's deprecated np.hanning for backward compatibility.
+        if HAS_SCIPY_WINDOWS:
+            return signal_windows.hann(self.n_elements)
+        else:
+            return np.hanning(self.n_elements)
 
     def map_to_grid(self, grid, z0=None):
         """Map element centers to grid indices (ix, iy, iz) using Grid object.
@@ -403,7 +423,7 @@ class Transducer:
         
         return result
 
-    def band_limited_interpolation_weights(self, grid, points, z0=0.0, kernel_radius=3,
+    def band_limited_interpolation_weights(self, grid, points, z0=None, kernel_radius=3,
                                           staggered_component=None, tolerance=1e-3, use_gpu=False):
         """
         Compute BLI weights for source points on grid using vectorized calculation.
@@ -432,6 +452,15 @@ class Transducer:
             indices: (N, 3) array of grid indices (i, j, k)
             weights: (N,) array of corresponding weights
         """
+        # Issue deprecation warning for z0 parameter
+        if z0 is not None:
+            warnings.warn(
+                "The 'z0' parameter is deprecated and will be removed in a future version. "
+                "Use the z-coordinates in the 'points' array instead.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+        
         # Select array module (for GPU or CPU)
         if use_gpu and HAS_CUPY:
             xp = cp
@@ -586,7 +615,7 @@ class Transducer:
         
         return indices, weights
 
-    def create_element_mask(self, grid, element_idx, n_points_x, n_points_y, z0=0.0,
+    def create_element_mask(self, grid, element_idx, n_points_x, n_points_y, z0=None,
                            kernel_radius=3, tolerance=1e-3, staggered_component=None, use_gpu=False):
         """
         Create BLI mask for a single element.
@@ -607,6 +636,15 @@ class Transducer:
             indices: (N, 3) array of grid indices
             weights: (N,) array of weights
         """
+        # Issue deprecation warning for z0 parameter
+        if z0 is not None:
+            warnings.warn(
+                "The 'z0' parameter is deprecated and will be removed in a future version. "
+                "Use the element's z-coordinate in element_positions instead.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+        
         # Generate surface points (uses element's 3D position)
         points = self.generate_element_surface_points(element_idx, n_points_x, n_points_y)
         
@@ -618,7 +656,7 @@ class Transducer:
         return indices, weights
 
     def create_element_masks_staggered(self, grid, element_idx, n_points_x, n_points_y,
-                                      z0=0.0, kernel_radius=3, tolerance=1e-3, use_gpu=False):
+                                      z0=None, kernel_radius=3, tolerance=1e-3, use_gpu=False):
         """
         Create staggered grid masks for velocity components.
         
@@ -630,7 +668,8 @@ class Transducer:
             element_idx: Element index
             n_points_x: Number of sample points along width
             n_points_y: Number of sample points along height
-            z0: Z-position of transducer surface
+            z0: Deprecated - kept for backward compatibility. 
+                Uses element's 3D position from element_positions.
             kernel_radius: Sinc kernel radius
             tolerance: Weight threshold for BLI star point selection
             use_gpu: Use GPU acceleration
@@ -638,6 +677,15 @@ class Transducer:
         Returns:
             dict: {'vx': (indices, weights), 'vy': (indices, weights), 'vz': (indices, weights)}
         """
+        # Issue deprecation warning for z0 parameter
+        if z0 is not None:
+            warnings.warn(
+                "The 'z0' parameter is deprecated and will be removed in a future version. "
+                "Use the element's z-coordinate in element_positions instead.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+        
         # Generate surface points once
         points = self.generate_element_surface_points(element_idx, n_points_x, n_points_y)
         
@@ -652,7 +700,7 @@ class Transducer:
         
         return masks
 
-    def create_all_element_masks(self, grid, n_points_x, n_points_y, z0=0.0,
+    def create_all_element_masks(self, grid, n_points_x, n_points_y, z0=None,
                                  kernel_radius=3, tolerance=1e-3, staggered=False, use_gpu=False):
         """
         Create BLI masks for all elements.
@@ -661,7 +709,8 @@ class Transducer:
             grid: Grid object
             n_points_x: Number of sample points along width per element
             n_points_y: Number of sample points along height per element
-            z0: Z-position of transducer surface
+            z0: Deprecated - kept for backward compatibility. 
+                Uses element's 3D position from element_positions.
             kernel_radius: Sinc kernel radius
             tolerance: Weight threshold for BLI star point selection
             staggered: If True, return staggered masks for velocity components
@@ -671,6 +720,15 @@ class Transducer:
             If staggered=False: list of (indices, weights) tuples
             If staggered=True: list of dicts with 'vx', 'vy', 'vz' keys
         """
+        # Issue deprecation warning for z0 parameter
+        if z0 is not None:
+            warnings.warn(
+                "The 'z0' parameter is deprecated and will be removed in a future version. "
+                "Use the element's z-coordinate in element_positions instead.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+        
         masks = []
         
         for elem_idx in range(self.n_elements):

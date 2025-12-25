@@ -5,7 +5,6 @@ for elevation focusing capabilities. The 1.5D array allows electronic
 control in the elevation direction while maintaining mechanical focus
 in the lateral direction.
 """
-import time
 import numpy as np
 import os
 import sys
@@ -79,9 +78,6 @@ def main():
     print(f"  Focus point: x={focus_point[0]*1e3:.1f}mm, y={focus_point[1]*1e3:.1f}mm, z={focus_point[2]*1e3:.1f}mm")
     print(f"  Delay range: [{delays.min()*1e6:.3f}, {delays.max()*1e6:.3f}]µs")
     print(f"  Max delay: {delays.max()*1e6:.3f}µs")
-    
-    # Apply apodization to reduce side lobes
-    apod = np.hanning(tx.n_elements)
     
     # Generate source waveform
     fs = 1.0 / grid.dt

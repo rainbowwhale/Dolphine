@@ -4,7 +4,6 @@ This demo shows how to use a 2D matrix transducer array for full 3D
 beam steering and focusing. Matrix arrays provide complete electronic
 control in all dimensions, enabling volumetric imaging.
 """
-import time
 import numpy as np
 import os
 import sys
@@ -115,15 +114,6 @@ def main():
     print(f"  Waveform: {len(sig)} samples")
     print(f"  Sampling rate: {fs/1e6:.1f}MHz")
     print(f"  Duration: {len(sig)/fs*1e6:.2f}µs")
-    
-    # Apply 2D apodization (Hanning window in both dimensions)
-    apod_x = np.hanning(tx.n_elements_x)
-    apod_y = np.hanning(tx.n_elements_y)
-    apod_2d = np.outer(apod_y, apod_x).flatten()
-    
-    print(f"\nApodization:")
-    print(f"  Type: 2D Hanning window")
-    print(f"  Shape: {tx.n_elements_y} × {tx.n_elements_x}")
     
     # Map elements to grid
     elem_idx = tx.map_to_grid(grid, z0=0.0)

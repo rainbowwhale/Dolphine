@@ -7,7 +7,7 @@ This document describes the different transducer array types supported in Dolphi
 Dolphine supports three types of ultrasound transducer arrays:
 
 1. **Linear (1D) Transducer** - Single row of elements for 2D imaging
-2. **1.5D Transducer** - Multiple rows (3-7) with variable heights for elevation focusing
+2. **1.5D Transducer** - Multiple rows (typically 3-7, supports more) with variable heights for elevation focusing
 3. **2D Matrix Transducer** - Large 2D grid (10s-100s of elements) for 3D volumetric imaging
 
 ## 1. Linear (1D) Transducer
@@ -60,16 +60,17 @@ A 1.5D array has multiple rows (typically 3-7, but can be more) in the elevation
 
 ### Usage
 
-**Method 1: Provide array of heights (n_rows derived automatically)**
+**Method 1: Provide array of heights (n_rows inferred/validated automatically)**
 ```python
 from transducer import Transducer1p5D
 
-# n_rows is automatically determined from array length
+# If n_rows is not provided, it is inferred from len(row_heights).
+# If n_rows is provided, it must match len(row_heights) or an error is raised.
 row_heights = [0.0003, 0.0004, 0.0005, 0.0004, 0.0003]  # meters (5 rows)
 
 tx = Transducer1p5D(
     n_elements_per_row=32,
-    row_heights=row_heights,  # n_rows = 5 (from array length)
+    row_heights=row_heights,  # n_rows inferred as 5 unless explicitly provided
     pitch=0.0003,
     row_pitch=0.0004,
     center_freq=5e6
@@ -267,7 +268,7 @@ weighted_signal = signal * apod_2d
 
 | Feature | Linear (1D) | 1.5D | 2D Matrix |
 |---------|-------------|------|-----------|
-| **Elements** | 64-256 | 96-448 (3-7 rows) | 256-16,384 |
+| **Elements** | 64-256 | 96-448 (typically 3-7 rows) | 256-16,384 |
 | **Focusing** | X-Z plane only | X-Z with elevation | Full 3D |
 | **Steering** | Azimuth only | Azimuth + limited elevation | Full 3D |
 | **Elevation** | Fixed (lens) | Electronic | Electronic |
@@ -365,13 +366,13 @@ python examples/run_convex_probe.py
 - **Transducer surface**: Z = 0
 
 ### Element Positions
-All transducer types store element positions in `element_positions_2d`:
-- Shape: (n_elements, 2) for (x, y) coordinates
-- Centered at origin (0, 0)
-- Z = 0 for transducer surface
+All transducer types store element positions in `element_positions`:
+- Shape: (n_elements, 3) for (x, y, z) coordinates
+- Centered at origin in the lateral/elevation plane (x = 0, y = 0)
+- Transducer surface lies at z = 0 by convention
 
 ### Compatibility
-- 1D transducers use only X positions (Y = 0)
-- 1.5D and 2D use full (X, Y) positioning
+- 1D transducers use only X positions (Y = 0, Z = 0)
+- 1.5D and 2D use full (X, Y) positioning with Z = 0 at the surface (unless otherwise specified)
 - All methods work with existing BLI implementation
 - Backward compatible with existing code

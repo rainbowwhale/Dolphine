@@ -33,7 +33,7 @@ def test_basic_creation():
     print(f"  Element size: {tx.element_width*1e3:.3f}mm × {tx.element_height*1e3:.3f}mm")
     
     assert tx.n_elements == 16 * 16, "Total elements should be 256"
-    assert tx.element_width == tx.element_height, "Elements should be square when element_height matches element_width"
+    assert tx.element_width == tx.element_height, "Elements should be square"
     
     print("\n✓ Basic creation OK")
     print()
