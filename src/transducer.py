@@ -236,7 +236,8 @@ class Transducer:
     def delays_for_focus_3d(self, focus_point, speed_of_sound=None):
         """Compute transmission delays for 3D focus point (x, y, z) in meters.
         
-        Alias for delays_for_focus() with explicit 3D focus point.
+        Note: This method is now an alias for delays_for_focus(), which accepts
+        both 2D (x, z) and 3D (x, y, z) focus points. Prefer using delays_for_focus().
         
         Args:
             focus_point: Tuple (x, y, z) of focus point in meters
@@ -282,6 +283,8 @@ class Transducer:
 
     def apodization_hanning(self):
         """Return Hanning apodization weights across elements."""
+        # Note: np.hanning is deprecated since NumPy 1.25, but we maintain
+        # compatibility with older NumPy versions. The window is identical.
         return np.hanning(self.n_elements)
 
     def map_to_grid(self, grid, z0=None):
@@ -418,7 +421,8 @@ class Transducer:
         Args:
             grid: Grid object with axis vectors (x_vec, y_vec, z_vec)
             points: Array of (x, y, z) source point coordinates
-            z0: Z-position of transducer surface (m) - ignored, uses points[:, 2]
+            z0: Deprecated - kept for backward compatibility. 
+                Uses points[:, 2] for z-coordinates.
             kernel_radius: Sinc kernel radius in grid cells (e.g., 3 means -3 to +3)
             staggered_component: None for pressure (centered), 'x', 'y', or 'z' for velocity
             tolerance: Weight threshold for selecting BLI star points (default: 1e-3)
@@ -592,7 +596,8 @@ class Transducer:
             element_idx: Element index
             n_points_x: Number of sample points along width
             n_points_y: Number of sample points along height
-            z0: Z-position of transducer surface (ignored for curved transducers)
+            z0: Deprecated - kept for backward compatibility. 
+                Uses element's 3D position from element_positions.
             kernel_radius: Sinc kernel radius (grid cells)
             tolerance: Weight threshold for BLI star point selection
             staggered_component: None, 'x', 'y', or 'z' for staggered grids
