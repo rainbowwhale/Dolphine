@@ -37,6 +37,8 @@ class Transducer:
     Includes band-limited interpolation (BLI) for distributed source injection.
     Reference: https://doi.org/10.1121/1.5116132
     """
+    # Default configuration constants
+    DEFAULT_ROW_HEIGHT = 0.0004  # Default row height in meters (0.4mm) for 1.5D arrays
     
     def __init__(self, n_elements=64, pitch=0.0003, element_width=0.00028, kerf=0.00002,
                  center_freq=5e6, c=1540.0, element_height=0.010,
@@ -94,15 +96,16 @@ class Transducer:
                 n_rows = len(self.row_heights)
             n_elements_y = n_rows
             self.n_rows = n_rows
-            # Generate per-element heights from row_heights
+            # Generate per-element heights from row_heights.
+            # Note: element_heights here represents heights derived from row_heights
+            # (all elements in a row get the same height), not custom per-element heights.
             if n_elements_x is not None:
                 element_heights = np.repeat(self.row_heights, n_elements_x)
         elif n_rows is not None:
             n_elements_y = n_rows
             self.n_rows = n_rows
             # Default row heights
-            DEFAULT_ROW_HEIGHT = 0.0004  # 0.4mm
-            self.row_heights = np.full(n_rows, DEFAULT_ROW_HEIGHT)
+            self.row_heights = np.full(n_rows, self.DEFAULT_ROW_HEIGHT)
             if n_elements_x is not None:
                 element_heights = np.repeat(self.row_heights, n_elements_x)
         
@@ -236,8 +239,9 @@ class Transducer:
     def delays_for_focus_3d(self, focus_point, speed_of_sound=None):
         """Compute transmission delays for 3D focus point (x, y, z) in meters.
         
-        Note: This method is now an alias for delays_for_focus(), which accepts
-        both 2D (x, z) and 3D (x, y, z) focus points. Prefer using delays_for_focus().
+        .. deprecated::
+            This method is deprecated and will be removed in a future version.
+            Use delays_for_focus() instead, which accepts both 2D (x, z) and 3D (x, y, z) focus points.
         
         Args:
             focus_point: Tuple (x, y, z) of focus point in meters
@@ -246,6 +250,13 @@ class Transducer:
         Returns:
             delays: Array of delays for each element (seconds)
         """
+        import warnings
+        warnings.warn(
+            "delays_for_focus_3d() is deprecated. Use delays_for_focus() instead, "
+            "which accepts both 2D and 3D focus points.",
+            DeprecationWarning,
+            stacklevel=2
+        )
         return self.delays_for_focus(focus_point, speed_of_sound)
 
     def delays_for_steering_3d(self, steering_angles, speed_of_sound=None):
@@ -283,9 +294,13 @@ class Transducer:
 
     def apodization_hanning(self):
         """Return Hanning apodization weights across elements."""
-        # Note: np.hanning is deprecated since NumPy 1.25, but we maintain
-        # compatibility with older NumPy versions. The window is identical.
-        return np.hanning(self.n_elements)
+        # Prefer SciPy's recommended Hann window implementation when available,
+        # but fall back to NumPy's deprecated np.hanning for backward compatibility.
+        try:
+            from scipy.signal import windows as _signal_windows
+            return _signal_windows.hann(self.n_elements, sym=True)
+        except Exception:
+            return np.hanning(self.n_elements)
 
     def map_to_grid(self, grid, z0=None):
         """Map element centers to grid indices (ix, iy, iz) using Grid object.
@@ -432,6 +447,16 @@ class Transducer:
             indices: (N, 3) array of grid indices (i, j, k)
             weights: (N,) array of corresponding weights
         """
+        # Issue deprecation warning for z0 parameter
+        if z0 != 0.0:
+            import warnings
+            warnings.warn(
+                "The 'z0' parameter is deprecated and will be removed in a future version. "
+                "Use the z-coordinates in the 'points' array instead.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+        
         # Select array module (for GPU or CPU)
         if use_gpu and HAS_CUPY:
             xp = cp
@@ -607,6 +632,16 @@ class Transducer:
             indices: (N, 3) array of grid indices
             weights: (N,) array of weights
         """
+        # Issue deprecation warning for z0 parameter
+        if z0 != 0.0:
+            import warnings
+            warnings.warn(
+                "The 'z0' parameter is deprecated and will be removed in a future version. "
+                "Use the element's z-coordinate in element_positions instead.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+        
         # Generate surface points (uses element's 3D position)
         points = self.generate_element_surface_points(element_idx, n_points_x, n_points_y)
         
