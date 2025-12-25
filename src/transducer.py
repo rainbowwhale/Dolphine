@@ -21,7 +21,7 @@ import warnings
 try:
     from scipy.signal import windows as signal_windows
     HAS_SCIPY_WINDOWS = True
-except (ImportError, ModuleNotFoundError):
+except ImportError:
     HAS_SCIPY_WINDOWS = False
 
 try:
@@ -656,7 +656,7 @@ class Transducer:
         return indices, weights
 
     def create_element_masks_staggered(self, grid, element_idx, n_points_x, n_points_y,
-                                      z0=0.0, kernel_radius=3, tolerance=1e-3, use_gpu=False):
+                                      z0=None, kernel_radius=3, tolerance=1e-3, use_gpu=False):
         """
         Create staggered grid masks for velocity components.
         
@@ -668,7 +668,8 @@ class Transducer:
             element_idx: Element index
             n_points_x: Number of sample points along width
             n_points_y: Number of sample points along height
-            z0: Z-position of transducer surface
+            z0: Deprecated - kept for backward compatibility. 
+                Uses element's 3D position from element_positions.
             kernel_radius: Sinc kernel radius
             tolerance: Weight threshold for BLI star point selection
             use_gpu: Use GPU acceleration
@@ -676,6 +677,15 @@ class Transducer:
         Returns:
             dict: {'vx': (indices, weights), 'vy': (indices, weights), 'vz': (indices, weights)}
         """
+        # Issue deprecation warning for z0 parameter
+        if z0 is not None:
+            warnings.warn(
+                "The 'z0' parameter is deprecated and will be removed in a future version. "
+                "Use the element's z-coordinate in element_positions instead.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+        
         # Generate surface points once
         points = self.generate_element_surface_points(element_idx, n_points_x, n_points_y)
         
@@ -690,7 +700,7 @@ class Transducer:
         
         return masks
 
-    def create_all_element_masks(self, grid, n_points_x, n_points_y, z0=0.0,
+    def create_all_element_masks(self, grid, n_points_x, n_points_y, z0=None,
                                  kernel_radius=3, tolerance=1e-3, staggered=False, use_gpu=False):
         """
         Create BLI masks for all elements.
@@ -699,7 +709,8 @@ class Transducer:
             grid: Grid object
             n_points_x: Number of sample points along width per element
             n_points_y: Number of sample points along height per element
-            z0: Z-position of transducer surface
+            z0: Deprecated - kept for backward compatibility. 
+                Uses element's 3D position from element_positions.
             kernel_radius: Sinc kernel radius
             tolerance: Weight threshold for BLI star point selection
             staggered: If True, return staggered masks for velocity components
@@ -709,6 +720,15 @@ class Transducer:
             If staggered=False: list of (indices, weights) tuples
             If staggered=True: list of dicts with 'vx', 'vy', 'vz' keys
         """
+        # Issue deprecation warning for z0 parameter
+        if z0 is not None:
+            warnings.warn(
+                "The 'z0' parameter is deprecated and will be removed in a future version. "
+                "Use the element's z-coordinate in element_positions instead.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+        
         masks = []
         
         for elem_idx in range(self.n_elements):
