@@ -75,8 +75,8 @@ def test_element_positioning():
     print(f"Element positions (first 5):")
     for i in range(min(5, tx.n_elements)):
         row, col = tx.get_element_row_col(i)
-        x, y = tx.element_positions_2d[i]
-        print(f"  Element {i}: row={row}, col={col}, x={x*1e3:.3f}mm, y={y*1e3:.3f}mm")
+        x, y, z = tx.element_positions[i]
+        print(f"  Element {i}: row={row}, col={col}, x={x*1e3:.3f}mm, y={y*1e3:.3f}mm, z={z*1e3:.3f}mm")
     
     # Check first element (row 0, col 0)
     row, col = tx.get_element_row_col(0)
@@ -90,9 +90,9 @@ def test_element_positioning():
     row, col = tx.get_element_row_col(8)
     assert row == 1 and col == 0, "Element 8 should be at row 1, col 0"
     
-    # Check positions are centered
-    x_positions = tx.element_positions_2d[:, 0]
-    y_positions = tx.element_positions_2d[:, 1]
+    # Check positions are centered (using 3D element_positions)
+    x_positions = tx.element_positions[:, 0]
+    y_positions = tx.element_positions[:, 1]
     
     print(f"\nPosition ranges:")
     print(f"  X: [{x_positions.min()*1e3:.3f}, {x_positions.max()*1e3:.3f}]mm")
@@ -162,8 +162,8 @@ def test_surface_point_generation():
     print(f"  Expected height: {expected_height*1e3:.4f}mm")
     print(f"  Generated {len(points)} points")
     
-    # Check point distribution
-    y_rel = points[:, 1] - tx.element_positions_2d[elem_idx, 1]
+    # Check point distribution (element_positions is now 3D)
+    y_rel = points[:, 1] - tx.element_positions[elem_idx, 1]
     print(f"  Y range: [{y_rel.min()*1e3:.4f}, {y_rel.max()*1e3:.4f}]mm")
     print(f"  Expected: [{-expected_height/2*1e3:.4f}, {expected_height/2*1e3:.4f}]mm")
     

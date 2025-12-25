@@ -23,8 +23,8 @@ def test_basic_creation():
     print("Test 1: Basic 2D Matrix Transducer Creation")
     print("=" * 70)
     
-    # Create small matrix transducer
-    tx = MatrixTransducer(n_elements_x=16, n_elements_y=16)
+    # Create small matrix transducer with square elements
+    tx = MatrixTransducer(n_elements_x=16, n_elements_y=16, element_height=0.00028)
     
     print(f"Created 2D matrix transducer:")
     print(f"  Elements in X: {tx.n_elements_x}")
@@ -33,7 +33,7 @@ def test_basic_creation():
     print(f"  Element size: {tx.element_width*1e3:.3f}mm × {tx.element_height*1e3:.3f}mm")
     
     assert tx.n_elements == 16 * 16, "Total elements should be 256"
-    assert tx.element_width == tx.element_height, "Elements should be square by default"
+    assert tx.element_width == tx.element_height, "Elements should be square when element_height matches element_width"
     
     print("\n✓ Basic creation OK")
     print()
@@ -117,7 +117,7 @@ def test_element_positioning():
     
     for elem_idx, label in test_elements:
         row, col = tx.get_element_row_col(elem_idx)
-        x, y = tx.element_positions_2d[elem_idx]
+        x, y, z = tx.element_positions[elem_idx]
         print(f"  Element {elem_idx:2d} ({label}): row={row}, col={col}, "
               f"x={x*1e3:6.3f}mm, y={y*1e3:6.3f}mm")
     
@@ -138,9 +138,9 @@ def test_element_positioning():
     row, col = tx.get_element_row_col(63)
     assert row == 7 and col == 7, "Element 63 should be at (7, 7)"
     
-    # Check positions are centered
-    x_positions = tx.element_positions_2d[:, 0]
-    y_positions = tx.element_positions_2d[:, 1]
+    # Check positions are centered (element_positions is now 3D)
+    x_positions = tx.element_positions[:, 0]
+    y_positions = tx.element_positions[:, 1]
     
     print(f"\nPosition ranges:")
     print(f"  X: [{x_positions.min()*1e3:.3f}, {x_positions.max()*1e3:.3f}]mm")
