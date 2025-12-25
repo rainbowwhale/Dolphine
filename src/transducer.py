@@ -299,7 +299,7 @@ class Transducer:
         try:
             from scipy.signal import windows as _signal_windows
             return _signal_windows.hann(self.n_elements, sym=True)
-        except Exception:
+        except (ImportError, ModuleNotFoundError):
             return np.hanning(self.n_elements)
 
     def map_to_grid(self, grid, z0=None):
@@ -418,7 +418,7 @@ class Transducer:
         
         return result
 
-    def band_limited_interpolation_weights(self, grid, points, z0=0.0, kernel_radius=3,
+    def band_limited_interpolation_weights(self, grid, points, z0=None, kernel_radius=3,
                                           staggered_component=None, tolerance=1e-3, use_gpu=False):
         """
         Compute BLI weights for source points on grid using vectorized calculation.
@@ -448,7 +448,7 @@ class Transducer:
             weights: (N,) array of corresponding weights
         """
         # Issue deprecation warning for z0 parameter
-        if z0 != 0.0:
+        if z0 is not None:
             import warnings
             warnings.warn(
                 "The 'z0' parameter is deprecated and will be removed in a future version. "
@@ -611,7 +611,7 @@ class Transducer:
         
         return indices, weights
 
-    def create_element_mask(self, grid, element_idx, n_points_x, n_points_y, z0=0.0,
+    def create_element_mask(self, grid, element_idx, n_points_x, n_points_y, z0=None,
                            kernel_radius=3, tolerance=1e-3, staggered_component=None, use_gpu=False):
         """
         Create BLI mask for a single element.
@@ -633,7 +633,7 @@ class Transducer:
             weights: (N,) array of weights
         """
         # Issue deprecation warning for z0 parameter
-        if z0 != 0.0:
+        if z0 is not None:
             import warnings
             warnings.warn(
                 "The 'z0' parameter is deprecated and will be removed in a future version. "
