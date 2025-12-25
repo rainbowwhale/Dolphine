@@ -16,6 +16,13 @@ Unified design:
 - Configurable element layout via element_positions parameter
 """
 import numpy as np
+import warnings
+
+try:
+    from scipy.signal import windows as signal_windows
+    HAS_SCIPY_WINDOWS = True
+except (ImportError, ModuleNotFoundError):
+    HAS_SCIPY_WINDOWS = False
 
 try:
     import cupy as cp
@@ -250,7 +257,6 @@ class Transducer:
         Returns:
             delays: Array of delays for each element (seconds)
         """
-        import warnings
         warnings.warn(
             "delays_for_focus_3d() is deprecated. Use delays_for_focus() instead, "
             "which accepts both 2D and 3D focus points.",
@@ -296,10 +302,9 @@ class Transducer:
         """Return Hanning apodization weights across elements."""
         # Prefer SciPy's recommended Hann window implementation when available,
         # but fall back to NumPy's deprecated np.hanning for backward compatibility.
-        try:
-            from scipy.signal import windows as _signal_windows
-            return _signal_windows.hann(self.n_elements, sym=True)
-        except (ImportError, ModuleNotFoundError):
+        if HAS_SCIPY_WINDOWS:
+            return signal_windows.hann(self.n_elements, sym=True)
+        else:
             return np.hanning(self.n_elements)
 
     def map_to_grid(self, grid, z0=None):
@@ -449,7 +454,6 @@ class Transducer:
         """
         # Issue deprecation warning for z0 parameter
         if z0 is not None:
-            import warnings
             warnings.warn(
                 "The 'z0' parameter is deprecated and will be removed in a future version. "
                 "Use the z-coordinates in the 'points' array instead.",
@@ -634,7 +638,6 @@ class Transducer:
         """
         # Issue deprecation warning for z0 parameter
         if z0 is not None:
-            import warnings
             warnings.warn(
                 "The 'z0' parameter is deprecated and will be removed in a future version. "
                 "Use the element's z-coordinate in element_positions instead.",
