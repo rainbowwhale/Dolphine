@@ -230,7 +230,7 @@ Elements are numbered in row-major order:
 ```python
 # Focus at specific 3D point
 focus_point = (x, y, z)  # meters
-delays = tx.delays_for_focus_3d(focus_point)
+delays = tx.delays_for_focus(focus_point)
 ```
 
 **Steering:**
