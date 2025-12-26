@@ -72,7 +72,7 @@ def main():
     # Compute 3D focusing delays
     # Focus at 25mm depth, centered
     focus_point = (0.0, 0.0, 0.025)
-    delays = tx.delays_for_focus_3d(focus_point, speed_of_sound=1540.0)
+    delays = tx.delays_for_focus(focus_point, speed_of_sound=1540.0)
     
     print(f"\n3D Focusing:")
     print(f"  Focus point: x={focus_point[0]*1e3:.1f}mm, y={focus_point[1]*1e3:.1f}mm, z={focus_point[2]*1e3:.1f}mm")
