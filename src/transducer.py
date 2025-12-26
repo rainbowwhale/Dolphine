@@ -800,7 +800,7 @@ if __name__ == '__main__':
     
     # Test 5: 3D focusing
     print("\n=== Test 5: 3D Focusing ===")
-    delays = tx2d.delays_for_focus_3d((0.0, 0.0, 0.03))
+    delays = tx2d.delays_for_focus((0.0, 0.0, 0.03))
     print(f"Delay range: [{delays.min()*1e6:.3f}, {delays.max()*1e6:.3f}]µs")
     
     print("\n✓ All tests completed")
