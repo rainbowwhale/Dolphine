@@ -106,7 +106,7 @@ tx = Transducer1p5D(
 ```python
 # Compute 3D focusing delays
 focus = (0.0, 0.001, 0.03)  # (x, y, z) in meters
-delays = tx.delays_for_focus_3d(focus)
+delays = tx.delays_for_focus(focus)
 
 # Get element row/column
 row, col = tx.get_element_row_col(element_idx=42)
