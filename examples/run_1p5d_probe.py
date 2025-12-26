@@ -13,7 +13,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../src'))
 
 from grid import Grid
 from medium import Medium
-from transducer import Transducer1p5D
+from transducer import Transducer
 from source import tone_burst
 
 
@@ -51,7 +51,7 @@ def main():
     # Create 1.5D transducer
     # 5 rows with variable heights for improved elevation focusing
     row_heights = np.array([0.0003, 0.0004, 0.0005, 0.0004, 0.0003])  # Gaussian-like profile
-    tx = Transducer1p5D(
+    tx = Transducer(
         n_elements_per_row=32,
         n_rows=5,
         pitch=0.0003,

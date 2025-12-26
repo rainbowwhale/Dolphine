@@ -12,7 +12,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../src'))
 
 from grid import Grid
 from medium import Medium
-from transducer import MatrixTransducer
+from transducer import Transducer
 from source import tone_burst
 
 
@@ -55,7 +55,7 @@ def main():
     
     # Create 2D matrix transducer
     # Start with moderate size for demonstration
-    tx = MatrixTransducer(
+    tx = Transducer(
         n_elements_x=32,
         n_elements_y=32,
         pitch=0.0003,

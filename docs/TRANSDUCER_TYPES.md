@@ -62,13 +62,13 @@ A 1.5D array has multiple rows (typically 3-7, but can be more) in the elevation
 
 **Method 1: Provide array of heights (n_rows inferred/validated automatically)**
 ```python
-from transducer import Transducer1p5D
+from transducer import Transducer
 
 # If n_rows is not provided, it is inferred from len(row_heights).
 # If n_rows is provided, it must match len(row_heights) or an error is raised.
 row_heights = [0.0003, 0.0004, 0.0005, 0.0004, 0.0003]  # meters (5 rows)
 
-tx = Transducer1p5D(
+tx = Transducer(
     n_elements_per_row=32,
     row_heights=row_heights,  # n_rows inferred from array length (5 in this case)
     pitch=0.0003,
@@ -80,7 +80,7 @@ tx = Transducer1p5D(
 **Method 2: Specify n_rows for uniform heights**
 ```python
 # All rows will have uniform default height (0.4mm)
-tx = Transducer1p5D(
+tx = Transducer(
     n_elements_per_row=32,
     n_rows=7,                 # 7 rows with uniform heights
     pitch=0.0003,
@@ -92,7 +92,7 @@ tx = Transducer1p5D(
 **Method 3: Single height value with n_rows**
 ```python
 # All rows will have the specified height
-tx = Transducer1p5D(
+tx = Transducer(
     n_elements_per_row=32,
     n_rows=5,
     row_heights=0.0005,       # Single value: all rows get 0.5mm height
@@ -154,7 +154,7 @@ max_height = 0.0005   # 0.5mm
 row_heights = base_height + (max_height - base_height) * gaussian_weights
 
 # n_rows is automatically 5 (from array length)
-tx = Transducer1p5D(
+tx = Transducer(
     n_elements_per_row=64,
     row_heights=row_heights  # [0.3, 0.382, 0.5, 0.382, 0.3] mm
 )
@@ -162,7 +162,7 @@ tx = Transducer1p5D(
 # For more rows, just create a longer array
 n_rows_large = 10
 row_heights_large = np.linspace(0.0003, 0.0005, n_rows_large)  # n_rows_large rows
-tx_large = Transducer1p5D(
+tx_large = Transducer(
     n_elements_per_row=64,
     row_heights=row_heights_large  # n_rows = n_rows_large automatically
 )
@@ -184,9 +184,9 @@ A 2D matrix array has a large grid of elements (tens to hundreds of rows and col
 
 ### Usage
 ```python
-from transducer import MatrixTransducer
+from transducer import Transducer
 
-tx = MatrixTransducer(
+tx = Transducer(
     n_elements_x=32,          # Elements in X (lateral)
     n_elements_y=32,          # Elements in Y (elevation)
     pitch=0.0003,             # Spacing in both directions (m)

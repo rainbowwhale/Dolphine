@@ -747,11 +747,6 @@ class Transducer:
         return masks
 
 
-# Backward compatibility aliases
-Transducer1p5D = Transducer
-MatrixTransducer = Transducer
-
-
 # Test the implementation
 if __name__ == '__main__':
     from grid import Grid

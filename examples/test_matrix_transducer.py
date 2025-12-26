@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../src'))
 
 import numpy as np
 from grid import Grid
-from transducer import MatrixTransducer
+from transducer import Transducer
 
 
 def test_basic_creation():
@@ -24,7 +24,7 @@ def test_basic_creation():
     print("=" * 70)
     
     # Create small matrix transducer with square elements
-    tx = MatrixTransducer(n_elements_x=16, n_elements_y=16, element_height=0.00028)
+    tx = Transducer(n_elements_x=16, n_elements_y=16, element_height=0.00028)
     
     print(f"Created 2D matrix transducer:")
     print(f"  Elements in X: {tx.n_elements_x}")
@@ -54,7 +54,7 @@ def test_large_arrays():
     ]
     
     for nx, ny, label in array_sizes:
-        tx = MatrixTransducer(n_elements_x=nx, n_elements_y=ny)
+        tx = Transducer(n_elements_x=nx, n_elements_y=ny)
         print(f"{label} array {nx}×{ny}:")
         print(f"  Total elements: {tx.n_elements}")
         print(f"  Array size: {(nx-1)*tx.pitch*1e3:.2f}mm × {(ny-1)*tx.pitch*1e3:.2f}mm")
@@ -72,7 +72,7 @@ def test_uniform_elements():
     print("=" * 70)
     
     element_size = 0.0002  # 0.2mm
-    tx = MatrixTransducer(n_elements_x=16, n_elements_y=16,
+    tx = Transducer(n_elements_x=16, n_elements_y=16,
                          element_width=element_size,
                          element_height=element_size)
     
@@ -104,7 +104,7 @@ def test_element_positioning():
     print("Test 4: 2D Element Grid Positioning")
     print("=" * 70)
     
-    tx = MatrixTransducer(n_elements_x=8, n_elements_y=8, pitch=0.0003)
+    tx = Transducer(n_elements_x=8, n_elements_y=8, pitch=0.0003)
     
     print(f"Element positions (corners and center):")
     test_elements = [
@@ -160,7 +160,7 @@ def test_3d_focusing():
     print("Test 5: 3D Focusing")
     print("=" * 70)
     
-    tx = MatrixTransducer(n_elements_x=16, n_elements_y=16)
+    tx = Transducer(n_elements_x=16, n_elements_y=16)
     
     # Test various focus points
     focus_points = [
@@ -191,7 +191,7 @@ def test_3d_steering():
     print("Test 6: 3D Beam Steering")
     print("=" * 70)
     
-    tx = MatrixTransducer(n_elements_x=16, n_elements_y=16)
+    tx = Transducer(n_elements_x=16, n_elements_y=16)
     
     # Test steering angles
     steering_angles = [
@@ -222,7 +222,7 @@ def test_bli_mask_generation():
     print("=" * 70)
     
     grid = Grid(nx=64, ny=64, nz=64, dx=1e-4)
-    tx = MatrixTransducer(n_elements_x=8, n_elements_y=8)
+    tx = Transducer(n_elements_x=8, n_elements_y=8)
     
     # Create mask for one element
     elem_idx = 36  # Center element (row 4, col 4)
@@ -257,7 +257,7 @@ def test_grid_mapping():
     print("=" * 70)
     
     grid = Grid(nx=128, ny=128, nz=128, dx=1e-4)
-    tx = MatrixTransducer(n_elements_x=16, n_elements_y=16)
+    tx = Transducer(n_elements_x=16, n_elements_y=16)
     
     # Map elements to grid
     elem_indices = tx.map_to_grid(grid)
@@ -301,7 +301,7 @@ def test_performance_scaling():
     
     print(f"Mask generation timing:")
     for nx, ny in array_sizes:
-        tx = MatrixTransducer(n_elements_x=nx, n_elements_y=ny)
+        tx = Transducer(n_elements_x=nx, n_elements_y=ny)
         
         # Time single element mask generation
         start = time.time()
