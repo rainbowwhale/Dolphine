@@ -7,7 +7,7 @@ This document describes the different transducer array types supported in Dolphi
 Dolphine supports three types of ultrasound transducer arrays:
 
 1. **Linear (1D) Transducer** - Single row of elements for 2D imaging
-2. **1.5D Transducer** - Multiple rows (typically 3-7, supports more) with variable heights for elevation focusing
+2. **1.5D Transducer** - Multiple rows (typically 3-7 rows, though more rows are supported) with variable heights for elevation focusing
 3. **2D Matrix Transducer** - Large 2D grid (10s-100s of elements) for 3D volumetric imaging
 
 ## 1. Linear (1D) Transducer
