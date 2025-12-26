@@ -171,7 +171,7 @@ def test_3d_focusing():
     ]
     
     for focus_point, label in focus_points:
-        delays = tx.delays_for_focus_3d(focus_point)
+        delays = tx.delays_for_focus(focus_point)
         print(f"{label}:")
         print(f"  Focus: {focus_point}")
         print(f"  Delay range: [{delays.min()*1e6:.3f}, {delays.max()*1e6:.3f}]µs")
