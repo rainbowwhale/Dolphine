@@ -70,7 +70,7 @@ row_heights = [0.0003, 0.0004, 0.0005, 0.0004, 0.0003]  # meters (5 rows)
 
 tx = Transducer1p5D(
     n_elements_per_row=32,
-    row_heights=row_heights,  # n_rows inferred as 5 unless explicitly provided
+    row_heights=row_heights,  # n_rows inferred from array length (5 in this case)
     pitch=0.0003,
     row_pitch=0.0004,
     center_freq=5e6
