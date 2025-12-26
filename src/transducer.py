@@ -11,9 +11,9 @@ Key corrections:
 5. GPU acceleration with CuPy
 
 Unified design:
-- Single Transducer class supports all array types (1D, 1.5D, 2D matrix, curved/concave)
-- 3D element positions (x, y, z) for concave transducer support
-- Configurable element layout via element_positions parameter
+- Single Transducer class supports all array types (1D, 1.5D, 2D matrix, curved/concave).
+- 3D element positions (x, y, z) for concave transducer support.
+- Configurable element layout via element_positions parameter.
 """
 import numpy as np
 import warnings
