@@ -199,7 +199,7 @@ print(f"Total elements: {tx.n_elements}")  # 32 × 32 = 1024
 
 # 3D focusing
 focus = (0.002, 0.001, 0.025)  # (x, y, z) in meters
-delays_focus = tx.delays_for_focus_3d(focus)
+delays_focus = tx.delays_for_focus(focus)
 
 # 3D beam steering
 steering = (np.deg2rad(15), np.deg2rad(10))  # (θx, θy) in radians
