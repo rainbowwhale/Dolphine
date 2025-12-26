@@ -456,7 +456,7 @@ class Transducer:
         if z0 is not None:
             warnings.warn(
                 "The 'z0' parameter is deprecated and will be removed in a future version. "
-                "Use the z-coordinates in the 'points' array instead.",
+                "Pass z-coordinates via the 'points' array instead.",
                 DeprecationWarning,
                 stacklevel=2
             )
