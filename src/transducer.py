@@ -72,8 +72,10 @@ class Transducer:
                             If None, uses uniform element_height for all elements.
             n_elements_per_row: Legacy alias for n_elements_x (1.5D compatibility)
             n_rows: Legacy alias for n_elements_y (1.5D compatibility)
-            row_heights: Per-row heights array for 1.5D transducers. If provided,
-                        element_heights is generated automatically.
+            row_heights: Per-row heights array for 1.5D transducers. When provided
+                        together with n_elements_per_row (or n_elements_x),
+                        element_heights is generated automatically by assigning each
+                        element in a row the corresponding row height.
         """
         self.pitch = pitch
         self.element_width = element_width
