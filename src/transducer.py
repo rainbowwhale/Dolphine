@@ -118,7 +118,7 @@ class Transducer:
         
         # Set row_pitch default
         if row_pitch is None:
-            row_pitch = 0.0004 if (n_rows is not None or n_elements_per_row is not None) else pitch
+            row_pitch = 0.0004 if (n_rows is not None or n_elements_per_row is not None or n_elements_y is not None) else pitch
         self.row_pitch = row_pitch
         
         # Handle custom element positions (for curved/concave transducers)
