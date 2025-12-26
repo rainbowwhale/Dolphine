@@ -160,10 +160,11 @@ tx = Transducer1p5D(
 )
 
 # For more rows, just create a longer array
-row_heights_10 = np.linspace(0.0003, 0.0005, 10)  # 10 rows
+n_rows_large = 10
+row_heights_large = np.linspace(0.0003, 0.0005, n_rows_large)  # n_rows_large rows
 tx_large = Transducer1p5D(
     n_elements_per_row=64,
-    row_heights=row_heights_10  # n_rows = 10 automatically
+    row_heights=row_heights_large  # n_rows = n_rows_large automatically
 )
 ```
 
