@@ -268,7 +268,7 @@ weighted_signal = signal * apod_2d
 
 | Feature | Linear (1D) | 1.5D | 2D Matrix |
 |---------|-------------|------|-----------|
-| **Elements** | 64-256 | 96-448 (typically 3-7 rows) | 256-16,384 |
+| **Elements** | 64-256 | 96-448 total (3-7 rows × 32-64 per row) | 256-16,384 |
 | **Focusing** | X-Z plane only | X-Z with elevation | Full 3D |
 | **Steering** | Azimuth only | Azimuth + limited elevation | Full 3D |
 | **Elevation** | Fixed (lens) | Electronic | Electronic |
