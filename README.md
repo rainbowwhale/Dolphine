@@ -16,7 +16,7 @@ Features:
   - Sinc-based interpolation for smooth spatial distribution
 - Multiple transducer array types:
   - **Linear (1D)**: Single row of elements for 2D imaging
-  - **1.5D**: 3-7 rows with variable heights for elevation focusing
+  - **1.5D**: Multiple rows (typically 3-7) with variable heights for elevation focusing
   - **2D Matrix**: Large 2D grids (10s-100s of elements) for 3D volumetric imaging
 
 Notes:
