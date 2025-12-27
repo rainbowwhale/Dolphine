@@ -4,11 +4,19 @@ This document describes the different transducer array types supported in Dolphi
 
 ## Overview
 
-Dolphine supports three types of ultrasound transducer arrays:
+Dolphine supports a unified transducer class that handles all ultrasound array types with a common interface:
 
-1. **Linear (1D) Transducer** - Single row of elements for 2D imaging
-2. **1.5D Transducer** - Multiple rows (typically 3-7 rows, though more rows are supported) with variable heights for elevation focusing
-3. **2D Matrix Transducer** - Large 2D grid (10s-100s of elements) for 3D volumetric imaging
+1. **Linear (1D) Transducer** - Single row of elements for 2D imaging (roc=0)
+2. **Convex (1D) Transducer** - Curved single row for wider field of view (roc>0)
+3. **1.5D Transducer** - Multiple rows (typically 3-7) with variable heights for elevation focusing (roc=0)
+4. **2D Matrix Transducer** - Large 2D grid (10s-100s of elements) for 3D volumetric imaging (roc=0)
+
+### Unified Interface
+
+All transducer types use a consistent interface with three key parameters:
+- **n_cols**: Number of columns (lateral/x direction)
+- **n_rows**: Number of rows (elevation/y direction), default=1
+- **roc**: Radius of curvature (m). Use 0 or None for linear arrays, >0 for convex arrays.
 
 ## 1. Linear (1D) Transducer
 
@@ -20,21 +28,34 @@ The basic linear array has a single row of elements arranged along the lateral (
 - Electronic beam steering and focusing in azimuth (x-z plane)
 - Fixed elevation focus (mechanical lens)
 - Compact and cost-effective
+- Flat surface (roc=0)
 
 ### Usage
 ```python
 from transducer import Transducer
 
+# Modern interface (preferred)
 tx = Transducer(
-    n_elements=128,           # Number of elements
-    pitch=0.0003,             # Element spacing (m)
-    element_width=0.00028,    # Element width (m)
-    element_height=0.010,     # Element height (m) - fixed
-    center_freq=5e6           # Center frequency (Hz)
+    n_cols=128,              # Number of elements
+    n_rows=1,                # Single row
+    pitch=0.0003,            # Element spacing (m)
+    element_width=0.00028,   # Element width (m)
+    element_height=0.010,    # Element height (m)
+    roc=0,                   # Linear (no curvature)
+    center_freq=5e6          # Center frequency (Hz)
+)
+
+# Legacy interface (still supported)
+tx = Transducer(
+    n_elements=128,          # Number of elements
+    pitch=0.0003,
+    element_width=0.00028,
+    element_height=0.010,
+    center_freq=5e6
 )
 
 # Compute focusing delays
-focus = (0.0, 0.03)  # (x, z) in meters
+focus = (0.0, 0.0, 0.03)  # (x, y, z) in meters
 delays = tx.delays_for_focus(focus)
 ```
 
@@ -46,7 +67,53 @@ delays = tx.delays_for_focus(focus)
 
 ---
 
-## 2. 1.5D Transducer
+## 2. Convex (1D) Transducer
+
+### Description
+A convex array has a single row of elements arranged along a curved arc. The curvature provides a wider field of view compared to linear arrays, making it ideal for deep tissue imaging.
+
+### Key Features
+- Single row of elements arranged on curved surface
+- Radius of curvature (ROC) parameter controls degree of curvature
+- Wider field of view than linear arrays
+- Better for deep tissue imaging
+- Automatic position generation based on ROC
+
+### Usage
+```python
+from transducer import Transducer
+
+tx = Transducer(
+    n_cols=64,               # Number of elements
+    n_rows=1,                # Single row
+    pitch=0.0004,            # Element spacing (m)
+    roc=0.05,                # 50mm radius of curvature
+    center_freq=3.5e6        # Center frequency (Hz)
+)
+
+print(f"ROC: {tx.roc}m")
+print(f"Element positions vary in z: {tx.element_positions[:, 2].min():.4f} to {tx.element_positions[:, 2].max():.4f}m")
+
+# Compute focusing delays
+focus = (0.0, 0.0, 0.05)  # (x, y, z) in meters
+delays = tx.delays_for_focus(focus)
+```
+
+### ROC Parameter Guidelines
+- **Small ROC (20-40mm)**: Tighter curve, wider angle, better for shallow imaging
+- **Medium ROC (40-60mm)**: Standard abdominal imaging
+- **Large ROC (60-100mm)**: Gentler curve, narrower angle
+- **ROC=0 or None**: Linear array (no curvature)
+
+### Applications
+- Abdominal imaging
+- Cardiac imaging
+- Deep tissue imaging
+- Obstetrics (deep field of view)
+
+---
+
+## 3. 1.5D Transducer
 
 ### Description
 A 1.5D array has multiple rows (typically 3-7, but can be more) in the elevation direction. Rows can have different heights, allowing for electronic elevation focusing while maintaining good sensitivity.
@@ -60,19 +127,19 @@ A 1.5D array has multiple rows (typically 3-7, but can be more) in the elevation
 
 ### Usage
 
-**Method 1: Provide array of heights (n_rows inferred/validated automatically)**
+**Method 1: Modern interface with row_heights**
 ```python
 from transducer import Transducer
 
-# If n_rows is not provided, it is inferred from len(row_heights).
-# If n_rows is provided, it must match len(row_heights) or an error is raised.
+# Variable row heights (Gaussian-like profile)
 row_heights = [0.0003, 0.0004, 0.0005, 0.0004, 0.0003]  # meters (5 rows)
 
 tx = Transducer(
-    n_elements_per_row=32,
-    row_heights=row_heights,  # n_rows inferred from array length (5 in this case)
-    pitch=0.0003,
-    row_pitch=0.0004,
+    n_cols=32,               # Elements per row
+    row_heights=row_heights, # n_rows inferred from array length (5)
+    pitch=0.0003,            # Lateral pitch
+    row_pitch=0.0004,        # Elevation pitch
+    roc=0,                   # Linear (no curvature)
     center_freq=5e6
 )
 ```
@@ -81,21 +148,21 @@ tx = Transducer(
 ```python
 # All rows will have uniform default height (0.4mm)
 tx = Transducer(
-    n_elements_per_row=32,
-    n_rows=7,                 # 7 rows with uniform heights
+    n_cols=32,
+    n_rows=7,                # 7 rows with uniform heights
     pitch=0.0003,
     row_pitch=0.0004,
+    roc=0,
     center_freq=5e6
 )
 ```
 
-**Method 3: Single height value with n_rows**
+**Method 3: Legacy interface (backward compatible)**
 ```python
-# All rows will have the specified height
 tx = Transducer(
     n_elements_per_row=32,
     n_rows=5,
-    row_heights=0.0005,       # Single value: all rows get 0.5mm height
+    row_heights=row_heights,
     pitch=0.0003,
     row_pitch=0.0004,
     center_freq=5e6
@@ -170,7 +237,7 @@ tx_large = Transducer(
 
 ---
 
-## 3. 2D Matrix Transducer
+## 4. 2D Matrix Transducer
 
 ### Description
 A 2D matrix array has a large grid of elements (tens to hundreds of rows and columns) allowing full 3D electronic beam steering and focusing without mechanical scanning.
@@ -181,17 +248,21 @@ A 2D matrix array has a large grid of elements (tens to hundreds of rows and col
 - Full 3D electronic beam steering
 - 3D volumetric imaging
 - No mechanical scanning required
+- Flat surface (roc=0)
 
 ### Usage
+
+**Modern interface (preferred)**
 ```python
 from transducer import Transducer
 
 tx = Transducer(
-    n_elements_x=32,          # Elements in X (lateral)
-    n_elements_y=32,          # Elements in Y (elevation)
+    n_cols=32,                # Elements in X (lateral)
+    n_rows=32,                # Elements in Y (elevation)
     pitch=0.0003,             # Spacing in both directions (m)
     element_width=0.00028,    # Element width (m)
     element_height=0.00028,   # Element height (m)
+    roc=0,                    # Linear (no curvature)
     center_freq=5e6           # Center frequency (Hz)
 )
 
@@ -210,11 +281,23 @@ delays_steer = tx.delays_for_steering_3d(steering)
 row, col = tx.get_element_row_col(element_idx=500)
 ```
 
+**Legacy interface (backward compatible)**
+```python
+tx = Transducer(
+    n_elements_x=32,
+    n_elements_y=32,
+    pitch=0.0003,
+    element_width=0.00028,
+    element_height=0.00028,
+    center_freq=5e6
+)
+```
+
 ### Element Numbering
 Elements are numbered in row-major order:
-- Elements 0 to (n_elements_x - 1): Row 0
-- Elements n_elements_x to (2 × n_elements_x - 1): Row 1
-- Element at position (row, col): index = row × n_elements_x + col
+- Elements 0 to (n_cols - 1): Row 0
+- Elements n_cols to (2 × n_cols - 1): Row 1
+- Element at position (row, col): index = row × n_cols + col
 
 ### Array Sizes
 
@@ -267,17 +350,43 @@ weighted_signal = signal * apod_2d
 
 ## Comparison Table
 
-| Feature | Linear (1D) | 1.5D | 2D Matrix |
-|---------|-------------|------|-----------|
-| **Elements** | 64-256 | 96-448 total (3-7 rows × 32-64 per row) | 256-16,384 |
-| **Focusing** | X-Z plane only | X-Z with elevation | Full 3D |
-| **Steering** | Azimuth only | Azimuth + limited elevation | Full 3D |
-| **Elevation** | Fixed (lens) | Electronic | Electronic |
-| **Complexity** | Low | Medium | High |
-| **Cost** | Low | Medium | High |
-| **Imaging** | 2D | Enhanced 2D | 3D/4D |
-| **Frame Rate** | High | High | Lower (volume) |
-| **Applications** | General 2D | Cardiac, enhanced 2D | Volumetric, 4D |
+| Feature | Linear (1D) | Convex (1D) | 1.5D | 2D Matrix |
+|---------|-------------|-------------|------|-----------|
+| **Interface** | n_cols=N, n_rows=1, roc=0 | n_cols=N, n_rows=1, roc>0 | n_cols=N, n_rows=3-7, roc=0 | n_cols=N, n_rows=N, roc=0 |
+| **Elements** | 64-256 | 64-256 | 96-448 total | 256-16,384 |
+| **Geometry** | Flat | Curved | Flat | Flat |
+| **ROC** | 0 (linear) | 20-100mm | 0 (linear) | 0 (linear) |
+| **Focusing** | X-Z plane only | X-Z plane only | X-Z with elevation | Full 3D |
+| **Steering** | Azimuth only | Azimuth only | Azimuth + limited elevation | Full 3D |
+| **Elevation** | Fixed (lens) | Fixed (lens) | Electronic | Electronic |
+| **Field of View** | Rectangular | Fan-shaped (wider) | Rectangular | Pyramidal |
+| **Complexity** | Low | Low | Medium | High |
+| **Cost** | Low | Low-Medium | Medium | High |
+| **Imaging** | 2D | 2D (wider FOV) | Enhanced 2D | 3D/4D |
+| **Frame Rate** | High | High | High | Lower (volume) |
+| **Applications** | General 2D | Deep tissue, cardiac | Cardiac, enhanced 2D | Volumetric, 4D |
+
+---
+
+## Quick Reference
+
+### Creating Different Array Types
+
+```python
+from transducer import Transducer
+
+# 1D Linear
+tx_linear = Transducer(n_cols=64, n_rows=1, pitch=0.0003, roc=0)
+
+# 1D Convex
+tx_convex = Transducer(n_cols=64, n_rows=1, pitch=0.0004, roc=0.05)
+
+# 1.5D Linear
+tx_1p5d = Transducer(n_cols=32, n_rows=5, pitch=0.0003, row_pitch=0.0004, roc=0)
+
+# 2D Matrix
+tx_2d = Transducer(n_cols=32, n_rows=32, pitch=0.0003, roc=0)
+```
 
 ---
 
@@ -318,6 +427,9 @@ BLI masks use sparse representation:
 Comprehensive test suites are available:
 
 ```bash
+# Run comprehensive transducer demonstration
+python examples/transducer_demo.py
+
 # Test 1.5D transducer
 python examples/test_1p5d_transducer.py
 
@@ -335,6 +447,9 @@ python examples/test_corrected_bli.py
 Example simulation scripts demonstrate usage:
 
 ```bash
+# Comprehensive demo of all transducer types (NEW!)
+python examples/transducer_demo.py
+
 # 1.5D transducer simulation
 python examples/run_1p5d_probe.py
 
@@ -344,7 +459,7 @@ python examples/run_2d_matrix_probe.py
 # Linear transducer simulation
 python examples/run_linear_probe.py
 
-# Convex array (specialized 1D)
+# Convex array simulation
 python examples/run_convex_probe.py
 ```
 
