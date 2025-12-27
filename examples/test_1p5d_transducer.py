@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../src'))
 
 import numpy as np
 from grid import Grid
-from transducer import Transducer1p5D
+from transducer import Transducer
 
 
 def test_basic_creation():
@@ -24,7 +24,7 @@ def test_basic_creation():
     print("=" * 70)
     
     # Create 1.5D transducer with default parameters
-    tx = Transducer1p5D(n_elements_per_row=32, n_rows=5)
+    tx = Transducer(n_elements_per_row=32, n_rows=5)
     
     print(f"Created 1.5D transducer:")
     print(f"  Elements per row: {tx.n_elements_per_row}")
@@ -48,7 +48,7 @@ def test_variable_row_heights():
     
     # Create with custom row heights (Gaussian-like distribution)
     row_heights = np.array([0.0003, 0.0004, 0.0005, 0.0004, 0.0003])
-    tx = Transducer1p5D(n_elements_per_row=16, n_rows=5, row_heights=row_heights)
+    tx = Transducer(n_elements_per_row=16, n_rows=5, row_heights=row_heights)
     
     print(f"Custom row heights (mm): {row_heights * 1e3}")
     print(f"Element heights per row (mm):")
@@ -70,7 +70,7 @@ def test_element_positioning():
     print("Test 3: 2D Element Positioning")
     print("=" * 70)
     
-    tx = Transducer1p5D(n_elements_per_row=8, n_rows=3, pitch=0.0003, row_pitch=0.0004)
+    tx = Transducer(n_elements_per_row=8, n_rows=3, pitch=0.0003, row_pitch=0.0004)
     
     print(f"Element positions (first 5):")
     for i in range(min(5, tx.n_elements)):
@@ -112,7 +112,7 @@ def test_3d_focusing():
     print("Test 4: 3D Focusing")
     print("=" * 70)
     
-    tx = Transducer1p5D(n_elements_per_row=16, n_rows=5)
+    tx = Transducer(n_elements_per_row=16, n_rows=5)
     
     # Test focus at center
     focus_center = (0.0, 0.0, 0.03)  # 30mm depth, centered
@@ -149,7 +149,7 @@ def test_surface_point_generation():
     
     # Create transducer with variable row heights
     row_heights = np.array([0.0003, 0.0005, 0.0003])
-    tx = Transducer1p5D(n_elements_per_row=8, n_rows=3, row_heights=row_heights)
+    tx = Transducer(n_elements_per_row=8, n_rows=3, row_heights=row_heights)
     
     # Generate points for element in middle row (should use height 0.0005)
     elem_idx = 8  # First element of second row
@@ -182,7 +182,7 @@ def test_bli_mask_generation():
     print("=" * 70)
     
     grid = Grid(nx=64, ny=64, nz=64, dx=1e-4)
-    tx = Transducer1p5D(n_elements_per_row=8, n_rows=3)
+    tx = Transducer(n_elements_per_row=8, n_rows=3)
     
     # Create mask for one element
     elem_idx = 12  # Middle row, middle column
@@ -219,7 +219,7 @@ def test_grid_mapping():
     print("=" * 70)
     
     grid = Grid(nx=128, ny=128, nz=128, dx=1e-4)
-    tx = Transducer1p5D(n_elements_per_row=8, n_rows=3, pitch=0.0003)
+    tx = Transducer(n_elements_per_row=8, n_rows=3, pitch=0.0003)
     
     # Map elements to grid
     elem_indices = tx.map_to_grid(grid)
