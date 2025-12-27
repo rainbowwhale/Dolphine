@@ -53,6 +53,32 @@ class Transducer:
     # Default configuration constants
     DEFAULT_ROW_HEIGHT = 0.0004  # Default row height in meters (0.4mm) for 1.5D arrays
     
+    def _generate_convex_positions(self, n_cols, pitch, roc):
+        """Generate element positions for a convex array.
+        
+        Args:
+            n_cols: Number of elements
+            pitch: Element pitch (m)
+            roc: Radius of curvature (m)
+            
+        Returns:
+            element_positions: Array of shape (n_cols, 3) with (x, y, z) coordinates
+        """
+        arc_length = (n_cols - 1) * pitch
+        theta_span = arc_length / roc  # Total angular span (radians)
+        thetas = np.linspace(-theta_span/2, theta_span/2, n_cols)
+        
+        # Positions on arc (x-z plane, centered at origin)
+        x_positions = roc * np.sin(thetas)
+        z_positions = roc * (1 - np.cos(thetas))
+        
+        # 3D positions with y=0 for single row
+        return np.stack([
+            x_positions,
+            np.zeros(n_cols),
+            z_positions
+        ], axis=1)
+    
     def __init__(self, n_elements=64, pitch=0.0003, element_width=0.00028, kerf=0.00002,
                  center_freq=5e6, c=1540.0, element_height=0.010,
                  n_cols=None, n_rows=None, row_pitch=None, roc=None,
@@ -168,24 +194,7 @@ class Transducer:
                     self.n_elements = n_cols
                     self.n_cols = n_cols
                     self.n_rows = n_rows
-                    
-                    # Generate curved positions based on ROC
-                    # Assume symmetric angular span around center
-                    # Angular extent depends on pitch and number of elements
-                    arc_length = (n_cols - 1) * pitch
-                    theta_span = arc_length / self.roc  # Total angular span (radians)
-                    thetas = np.linspace(-theta_span/2, theta_span/2, n_cols)
-                    
-                    # Positions on arc (x-z plane, centered at origin)
-                    x_positions = self.roc * np.sin(thetas)
-                    z_positions = self.roc * (1 - np.cos(thetas))
-                    
-                    # 3D positions with y=0 for single row
-                    self.element_positions = np.stack([
-                        x_positions,
-                        np.zeros(self.n_elements),
-                        z_positions
-                    ], axis=1)
+                    self.element_positions = self._generate_convex_positions(n_cols, pitch, self.roc)
                 else:
                     # Linear 2D array (flat)
                     self.n_cols = n_cols
@@ -217,18 +226,7 @@ class Transducer:
                 
                 if self.roc > 0:
                     # Convex 1D array
-                    arc_length = (n_cols - 1) * pitch
-                    theta_span = arc_length / self.roc
-                    thetas = np.linspace(-theta_span/2, theta_span/2, n_cols)
-                    
-                    x_positions = self.roc * np.sin(thetas)
-                    z_positions = self.roc * (1 - np.cos(thetas))
-                    
-                    self.element_positions = np.stack([
-                        x_positions,
-                        np.zeros_like(x_positions),
-                        z_positions
-                    ], axis=1)
+                    self.element_positions = self._generate_convex_positions(n_cols, pitch, self.roc)
                 else:
                     # Linear 1D array
                     x_positions = (np.arange(n_cols) - (n_cols - 1) / 2.0) * pitch
