@@ -14,16 +14,24 @@ Features:
   - Surface point sampling for accurate element representation
   - Support for both normal and staggered grid configurations
   - Sinc-based interpolation for smooth spatial distribution
-- Multiple transducer array types:
-  - **Linear (1D)**: Single row of elements for 2D imaging
-  - **1.5D**: Multiple rows (typically 3-7) with variable heights for elevation focusing
-  - **2D Matrix**: Large 2D grids (10s-100s of elements) for 3D volumetric imaging
+- Unified transducer class supporting all array types with simple interface:
+  - **Linear (1D)**: Single row (n_cols=N, n_rows=1, roc=0)
+  - **Convex (1D)**: Curved single row (n_cols=N, n_rows=1, roc>0)
+  - **1.5D**: Multiple rows (n_cols=N, n_rows=3-7, roc=0)
+  - **2D Matrix**: Large grids (n_cols=N, n_rows=N, roc=0)
+- Parameters:
+  - `n_cols`: Number of columns (lateral direction)
+  - `n_rows`: Number of rows (elevation direction)
+  - `roc`: Radius of curvature (0 for linear, >0 for convex)
 
 Notes:
 - The examples are intentionally small so they can run on limited GPUs. Increase sizes for realistic runs.
 
 Run examples:
 ```bash
+# Comprehensive transducer demonstration (NEW!)
+python examples/transducer_demo.py
+
 # Linear (1D) transducer
 python examples/run_linear_probe.py
 

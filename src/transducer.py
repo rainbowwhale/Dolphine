@@ -35,11 +35,20 @@ except ImportError:
 class Transducer:
     """Unified transducer element geometry and beamforming utilities.
     
-    Supports all transducer array types:
-    - Linear (1D): Single row of elements
-    - 1.5D: Multiple rows with variable heights
-    - 2D Matrix: Large 2D grid for volumetric imaging
-    - Curved/Concave: Elements with non-zero z-coordinates
+    Supports all transducer array types with a common interface:
+    - Linear (1D): n_cols elements, n_rows=1, roc=0 (or None)
+    - Convex (1D): n_cols elements, n_rows=1, roc > 0 (radius of curvature)
+    - 1.5D Linear: n_cols × n_rows elements (3-7 rows typical), roc=0 (or None)
+    - 1.5D Convex: n_cols × n_rows elements (3-7 rows typical), roc > 0
+    - 2D Matrix Linear: n_cols × n_rows elements (large grids), roc=0 (or None)
+    - 2D Matrix Convex: n_cols × n_rows elements (large grids), roc > 0
+    
+    Key parameters:
+    - n_cols (or n_elements_x): Number of columns (lateral direction)
+    - n_rows (or n_elements_y): Number of rows (elevation direction), default=1
+    - roc: Radius of curvature (m). Use 0 or None for linear/flat arrays,
+           positive value for convex arrays. Applies lateral curvature to all rows.
+           Default=None (linear).
     
     Includes band-limited interpolation (BLI) for distributed source injection.
     Reference: https://doi.org/10.1121/1.5116132
@@ -47,35 +56,75 @@ class Transducer:
     # Default configuration constants
     DEFAULT_ROW_HEIGHT = 0.0004  # Default row height in meters (0.4mm) for 1.5D arrays
     
+    def _generate_convex_positions(self, n_cols, n_rows, pitch, row_pitch, roc):
+        """Generate element positions for a convex array.
+        
+        Supports both single-row (1D convex) and multi-row (1.5D/2D convex) arrays.
+        For multi-row arrays, all rows follow the same curved arc in the x-z plane,
+        with rows distributed along the y-axis.
+        
+        Args:
+            n_cols: Number of columns (elements per row)
+            n_rows: Number of rows
+            pitch: Element pitch in lateral direction (m)
+            row_pitch: Element pitch in elevation direction (m)
+            roc: Radius of curvature (m)
+            
+        Returns:
+            element_positions: Array of shape (n_cols*n_rows, 3) with (x, y, z) coordinates
+        """
+        # Calculate arc for x-z plane (lateral curvature)
+        arc_length = (n_cols - 1) * pitch
+        theta_span = arc_length / roc  # Total angular span (radians)
+        thetas = np.linspace(-theta_span/2, theta_span/2, n_cols)
+        
+        # Positions on arc (x-z plane, centered at origin)
+        x_positions = roc * np.sin(thetas)
+        z_positions = roc * (1 - np.cos(thetas))
+        
+        # Y positions for multiple rows (elevation)
+        y_positions = (np.arange(n_rows) - (n_rows - 1) / 2.0) * row_pitch
+        
+        # Create meshgrid for all elements
+        # Each row has the same x and z positions (same arc)
+        xx = np.tile(x_positions, n_rows)  # Repeat x positions for each row
+        yy = np.repeat(y_positions, n_cols)  # Each row gets its y position
+        zz = np.tile(z_positions, n_rows)  # Repeat z positions for each row
+        
+        return np.stack([xx, yy, zz], axis=1)
+    
     def __init__(self, n_elements=64, pitch=0.0003, element_width=0.00028, kerf=0.00002,
                  center_freq=5e6, c=1540.0, element_height=0.010,
-                 n_elements_x=None, n_elements_y=None, row_pitch=None,
+                 n_cols=None, n_rows=None, row_pitch=None, roc=None,
                  element_positions=None, element_heights=None,
-                 # Legacy 1.5D parameters for backward compatibility
-                 n_elements_per_row=None, n_rows=None, row_heights=None):
+                 # Legacy parameters for backward compatibility
+                 n_elements_x=None, n_elements_y=None,
+                 n_elements_per_row=None, row_heights=None):
         """
         Args:
-            n_elements: Number of transducer elements (overridden if element_positions provided)
+            n_elements: Number of transducer elements (for 1D linear arrays, or overridden)
             pitch: Center-to-center spacing between elements (m)
             element_width: Width of each element (lateral, m)
             kerf: Gap between elements (m)
             center_freq: Center frequency (Hz)
             c: Speed of sound (m/s)
             element_height: Height of element (elevation, m) - default for all elements
-            n_elements_x: Number of elements in x direction (for 2D arrays)
-            n_elements_y: Number of elements in y direction (for 2D arrays)
+            n_cols: Number of columns (lateral/x direction). Preferred over n_elements_x.
+            n_rows: Number of rows (elevation/y direction). Default=1 for 1D arrays.
             row_pitch: Center-to-center spacing between rows (elevation, m) - for 1.5D/2D arrays
+            roc: Radius of curvature (m). None or 0 for linear arrays, >0 for convex arrays.
+                 For convex arrays, automatically generates curved element positions.
             element_positions: Custom 3D positions array (N, 3) for (x, y, z) coordinates.
                               If provided, overrides automatic position generation.
-                              Enables curved/concave transducer geometries.
+                              Overrides roc parameter.
             element_heights: Per-element heights array (N,) for variable height elements.
                             If None, uses uniform element_height for all elements.
-            n_elements_per_row: Legacy alias for n_elements_x (1.5D compatibility)
-            n_rows: Legacy alias for n_elements_y (1.5D compatibility)
-            row_heights: Per-row heights array for 1.5D transducers. When provided
-                        together with n_elements_per_row (or n_elements_x),
-                        element_heights is generated automatically by assigning each
-                        element in a row the corresponding row height.
+            n_elements_x: Legacy alias for n_cols (backward compatibility)
+            n_elements_y: Legacy alias for n_rows (backward compatibility)
+            n_elements_per_row: Legacy alias for n_cols (1.5D compatibility)
+            row_heights: Per-row heights array for 1.5D transducers. When provided,
+                        element_heights is generated by assigning each element in a row
+                        the corresponding row height.
         """
         self.pitch = pitch
         self.element_width = element_width
@@ -83,13 +132,21 @@ class Transducer:
         self.center_freq = center_freq
         self.c = c
         self.element_height = element_height
+        self.roc = roc if roc is not None else 0  # Store ROC, default to 0 (linear)
         
-        # Handle legacy 1.5D parameters
-        if n_elements_per_row is not None:
-            n_elements_x = n_elements_per_row
-            self.n_elements_per_row = n_elements_per_row  # Store for backward compatibility
+        # Normalize parameter names: n_cols and n_rows are preferred
+        # Handle legacy parameter aliases for backward compatibility
+        if n_cols is None:
+            if n_elements_x is not None:
+                n_cols = n_elements_x
+            elif n_elements_per_row is not None:
+                n_cols = n_elements_per_row
         
-        # Handle row_heights and n_rows for 1.5D transducers
+        if n_rows is None:
+            if n_elements_y is not None:
+                n_rows = n_elements_y
+        
+        # Handle row_heights for 1.5D transducers
         if row_heights is not None:
             row_heights = np.atleast_1d(row_heights)
             if row_heights.size == 1:
@@ -103,81 +160,112 @@ class Transducer:
                 if n_rows is not None and n_rows != len(self.row_heights):
                     raise ValueError(f"n_rows ({n_rows}) doesn't match row_heights length ({len(self.row_heights)})")
                 n_rows = len(self.row_heights)
-            n_elements_y = n_rows
-            self.n_rows = n_rows
-            # Generate per-element heights from row_heights.
-            # Note: element_heights here represents heights derived from row_heights
-            # (all elements in a row get the same height), not custom per-element heights.
-            if n_elements_x is not None:
-                element_heights = np.repeat(self.row_heights, n_elements_x)
-        elif n_rows is not None:
-            n_elements_y = n_rows
-            self.n_rows = n_rows
-            # Default row heights
-            self.row_heights = np.full(n_rows, self.DEFAULT_ROW_HEIGHT)
-            if n_elements_x is not None:
-                element_heights = np.repeat(self.row_heights, n_elements_x)
+            # Generate per-element heights from row_heights (variable heights per row)
+            # All elements in a row get the same height
+            if n_cols is not None:
+                element_heights = np.repeat(self.row_heights, n_cols)
+        else:
+            # No row_heights specified - use uniform heights
+            if n_rows is None:
+                n_rows = 1
+            
+            # For 1.5D arrays (when using n_elements_per_row), create element_heights
+            # For 2D matrix arrays (when using n_elements_x/n_cols without n_elements_per_row),
+            # keep element_heights as None for uniform heights
+            if n_elements_per_row is not None and n_rows > 1:
+                # This is a 1.5D array - populate element_heights
+                self.row_heights = np.full(n_rows, self.DEFAULT_ROW_HEIGHT)
+                if n_cols is not None:
+                    element_heights = np.repeat(self.row_heights, n_cols)
+            else:
+                # This is a 2D matrix or 1D linear - use uniform heights
+                self.row_heights = np.full(n_rows, self.element_height)
+                # Don't set element_heights - keep it None for uniform heights
         
         # Set row_pitch default
         if row_pitch is None:
-            row_pitch = 0.0004 if (n_rows is not None or n_elements_per_row is not None or n_elements_y is not None) else pitch
+            row_pitch = 0.0004 if n_rows > 1 else pitch
         self.row_pitch = row_pitch
         
-        # Handle custom element positions (for curved/concave transducers)
+        # Handle custom element positions (for custom geometries)
         if element_positions is not None:
             element_positions = np.asarray(element_positions)
             if element_positions.ndim != 2 or element_positions.shape[1] != 3:
                 raise ValueError("element_positions must be shape (N, 3) for (x, y, z) coordinates")
             self.element_positions = element_positions
             self.n_elements = element_positions.shape[0]
+            # Infer n_cols and n_rows from custom positions if not provided
+            if n_cols is None:
+                n_cols = self.n_elements
+            if n_rows is None:
+                n_rows = 1
         else:
             # Generate positions based on array configuration
-            if n_elements_x is not None and n_elements_y is not None:
-                # 2D array (matrix or 1.5D style)
-                self.n_elements_x = n_elements_x
-                self.n_elements_y = n_elements_y
-                self.n_elements = n_elements_x * n_elements_y
-                
-                # Generate 2D element positions
-                x_positions = (np.arange(n_elements_x) - (n_elements_x - 1) / 2.0) * pitch
-                y_positions = (np.arange(n_elements_y) - (n_elements_y - 1) / 2.0) * self.row_pitch
-                
-                xx, yy = np.meshgrid(x_positions, y_positions, indexing='xy')
-                
-                # 3D positions with z=0 (flat transducer surface)
-                self.element_positions = np.stack([
-                    xx.flatten(),
-                    yy.flatten(),
-                    np.zeros(self.n_elements)
-                ], axis=1)
+            if n_cols is not None and n_rows is not None:
+                # 2D array (matrix or 1.5D style) or 1D array
+                if self.roc > 0:
+                    # Convex array with curvature (supports 1D, 1.5D, and 2D)
+                    self.n_elements = n_cols * n_rows
+                    self.n_cols = n_cols
+                    self.n_rows = n_rows
+                    self.element_positions = self._generate_convex_positions(
+                        n_cols, n_rows, pitch, self.row_pitch, self.roc
+                    )
+                else:
+                    # Linear array (flat)
+                    self.n_cols = n_cols
+                    self.n_rows = n_rows
+                    self.n_elements = n_cols * n_rows
+                    
+                    # Generate 2D element positions (centered)
+                    x_positions = (np.arange(n_cols) - (n_cols - 1) / 2.0) * pitch
+                    y_positions = (np.arange(n_rows) - (n_rows - 1) / 2.0) * self.row_pitch
+                    
+                    xx, yy = np.meshgrid(x_positions, y_positions, indexing='xy')
+                    
+                    # 3D positions with z=0 (flat transducer surface)
+                    self.element_positions = np.stack([
+                        xx.flatten(),
+                        yy.flatten(),
+                        np.zeros(self.n_elements)
+                    ], axis=1)
             else:
-                # 1D linear array
-                self.n_elements = n_elements
-                self.n_elements_x = n_elements
-                self.n_elements_y = 1
+                # 1D linear array (legacy: using n_elements)
+                if n_cols is None:
+                    n_cols = n_elements
+                if n_rows is None:
+                    n_rows = 1
+                    
+                self.n_elements = n_cols
+                self.n_cols = n_cols
+                self.n_rows = n_rows
                 
-                x_positions = (np.arange(n_elements) - (n_elements - 1) / 2.0) * pitch
-                
-                # 3D positions with y=0 and z=0
-                self.element_positions = np.stack([
-                    x_positions,
-                    np.zeros_like(x_positions),
-                    np.zeros_like(x_positions)
-                ], axis=1)
+                if self.roc > 0:
+                    # Convex 1D array
+                    self.element_positions = self._generate_convex_positions(
+                        n_cols, n_rows, pitch, self.row_pitch, self.roc
+                    )
+                else:
+                    # Linear 1D array
+                    x_positions = (np.arange(n_cols) - (n_cols - 1) / 2.0) * pitch
+                    
+                    # 3D positions with y=0 and z=0
+                    self.element_positions = np.stack([
+                        x_positions,
+                        np.zeros_like(x_positions),
+                        np.zeros_like(x_positions)
+                    ], axis=1)
         
-        # Set grid layout if not already set
-        if not hasattr(self, 'n_elements_x'):
-            self.n_elements_x = self.n_elements
-        if not hasattr(self, 'n_elements_y'):
-            self.n_elements_y = 1
-        
-        # Store n_elements_per_row if not already set (backward compatibility)
-        if not hasattr(self, 'n_elements_per_row'):
-            self.n_elements_per_row = self.n_elements_x
+        # Ensure n_cols and n_rows are set
+        if not hasattr(self, 'n_cols'):
+            self.n_cols = n_cols if n_cols is not None else self.n_elements
         if not hasattr(self, 'n_rows'):
-            self.n_rows = self.n_elements_y
-        if not hasattr(self, 'row_heights'):
-            self.row_heights = np.full(self.n_elements_y, self.element_height)
+            self.n_rows = n_rows if n_rows is not None else 1
+        
+        # Set legacy aliases for backward compatibility
+        self.n_elements_x = self.n_cols
+        self.n_elements_y = self.n_rows
+        self.n_elements_per_row = self.n_cols
         
         # Per-element heights (None means uniform element_height for all)
         if element_heights is not None:
@@ -206,8 +294,8 @@ class Transducer:
         Returns:
             (row_idx, col_idx): Row and column indices
         """
-        row_idx = element_idx // self.n_elements_x
-        col_idx = element_idx % self.n_elements_x
+        row_idx = element_idx // self.n_cols
+        col_idx = element_idx % self.n_cols
         return row_idx, col_idx
 
     def delays_for_focus(self, focus_point, speed_of_sound=None):
@@ -751,53 +839,106 @@ class Transducer:
 if __name__ == '__main__':
     from grid import Grid
     
-    print("Testing unified Transducer class...")
+    print("Testing unified Transducer class with new interface...")
+    print("="*70)
     
     # Create test setup
     grid = Grid(nx=64, ny=64, nz=64, dx=1e-4)
     
-    # Test 1: Basic 1D linear transducer
-    print("\n=== Test 1: 1D Linear Transducer ===")
-    tx1d = Transducer(n_elements=4, element_width=0.0003, element_height=0.002)
-    print(f"Created 1D transducer with {tx1d.n_elements} elements")
-    print(f"Element positions shape: {tx1d.element_positions.shape}")
-    print(f"First element position: {tx1d.element_positions[0]}")
+    # Test 1: 1D Linear Transducer (roc=0 or None)
+    print("\n=== Test 1: 1D Linear Transducer (roc=0) ===")
+    tx_linear = Transducer(n_cols=32, n_rows=1, pitch=0.0003, roc=0)
+    print(f"Created linear transducer:")
+    print(f"  n_cols={tx_linear.n_cols}, n_rows={tx_linear.n_rows}")
+    print(f"  Total elements: {tx_linear.n_elements}")
+    print(f"  ROC: {tx_linear.roc}m (0 = linear)")
+    print(f"  Element positions shape: {tx_linear.element_positions.shape}")
+    print(f"  Z-range: [{tx_linear.element_positions[:, 2].min():.4f}, {tx_linear.element_positions[:, 2].max():.4f}]m")
     
-    # Test 2: 2D matrix transducer
-    print("\n=== Test 2: 2D Matrix Transducer ===")
-    tx2d = Transducer(n_elements_x=8, n_elements_y=8, pitch=0.0003)
-    print(f"Created 2D matrix with {tx2d.n_elements} elements ({tx2d.n_elements_x}x{tx2d.n_elements_y})")
-    print(f"Element positions shape: {tx2d.element_positions.shape}")
+    # Test 2: Convex Transducer (roc > 0)
+    print("\n=== Test 2: Convex Transducer (roc=0.05m) ===")
+    tx_convex = Transducer(n_cols=32, n_rows=1, pitch=0.0003, roc=0.05)
+    print(f"Created convex transducer:")
+    print(f"  n_cols={tx_convex.n_cols}, n_rows={tx_convex.n_rows}")
+    print(f"  Total elements: {tx_convex.n_elements}")
+    print(f"  ROC: {tx_convex.roc}m (>0 = convex)")
+    print(f"  Element positions shape: {tx_convex.element_positions.shape}")
+    print(f"  Z-range: [{tx_convex.element_positions[:, 2].min():.4f}, {tx_convex.element_positions[:, 2].max():.4f}]m")
+    x_positions = tx_convex.element_positions[:, 0]
+    print(f"  X-range: [{x_positions.min()*1e3:.3f}, {x_positions.max()*1e3:.3f}]mm")
     
-    # Test 3: Custom curved transducer
-    print("\n=== Test 3: Curved/Concave Transducer ===")
-    # Create simple curved array (arc)
-    n_elem = 16
-    angles = np.linspace(-np.pi/4, np.pi/4, n_elem)
-    radius = 0.05  # 5cm radius
-    curved_positions = np.stack([
-        radius * np.sin(angles),  # x
-        np.zeros(n_elem),          # y
-        radius * (1 - np.cos(angles))  # z (concave towards positive z)
-    ], axis=1)
-    tx_curved = Transducer(element_positions=curved_positions, element_width=0.0003)
-    print(f"Created curved transducer with {tx_curved.n_elements} elements")
-    print(f"Z-range: [{tx_curved.element_positions[:, 2].min():.4f}, {tx_curved.element_positions[:, 2].max():.4f}]m")
+    # Test 3: 1.5D Linear Transducer
+    print("\n=== Test 3: 1.5D Linear Transducer ===")
+    tx_1p5d = Transducer(n_cols=32, n_rows=5, pitch=0.0003, row_pitch=0.0004, roc=0)
+    print(f"Created 1.5D transducer:")
+    print(f"  n_cols={tx_1p5d.n_cols}, n_rows={tx_1p5d.n_rows}")
+    print(f"  Total elements: {tx_1p5d.n_elements}")
+    print(f"  ROC: {tx_1p5d.roc}m (0 = linear)")
+    print(f"  Element positions shape: {tx_1p5d.element_positions.shape}")
     
-    # Test 4: Generate points and BLI mask
-    print("\n=== Test 4: BLI Mask Generation ===")
-    points = tx1d.generate_element_surface_points(0, n_points_x=5, n_points_y=5)
-    print(f"Generated {len(points)} points")
-    print(f"Point range X: [{points[:, 0].min()*1e3:.3f}, {points[:, 0].max()*1e3:.3f}]mm")
-    print(f"Point range Z: [{points[:, 2].min()*1e3:.3f}, {points[:, 2].max()*1e3:.3f}]mm")
+    # Test 4: 2D Matrix Transducer
+    print("\n=== Test 4: 2D Matrix Transducer ===")
+    tx_2d = Transducer(n_cols=16, n_rows=16, pitch=0.0003, roc=0)
+    print(f"Created 2D matrix transducer:")
+    print(f"  n_cols={tx_2d.n_cols}, n_rows={tx_2d.n_rows}")
+    print(f"  Total elements: {tx_2d.n_elements}")
+    print(f"  ROC: {tx_2d.roc}m (0 = linear)")
+    print(f"  Element positions shape: {tx_2d.element_positions.shape}")
     
-    indices, weights = tx1d.create_element_mask(grid, 0, n_points_x=5, n_points_y=5)
+    # Test 5: Backward compatibility
+    print("\n=== Test 5: Backward Compatibility ===")
+    tx_legacy = Transducer(n_elements_x=8, n_elements_y=8, pitch=0.0003)
+    print(f"Created transducer using legacy parameters:")
+    print(f"  n_cols={tx_legacy.n_cols}, n_rows={tx_legacy.n_rows}")
+    print(f"  n_elements_x={tx_legacy.n_elements_x}, n_elements_y={tx_legacy.n_elements_y}")
+    print(f"  Total elements: {tx_legacy.n_elements}")
+    
+    # Test 6: 1.5D Convex Array (NEW!)
+    print("\n=== Test 6: 1.5D Convex Array ===")
+    tx_1p5d_convex = Transducer(n_cols=32, n_rows=5, pitch=0.0003, row_pitch=0.0004, roc=0.05)
+    print(f"Created 1.5D convex transducer:")
+    print(f"  n_cols={tx_1p5d_convex.n_cols}, n_rows={tx_1p5d_convex.n_rows}")
+    print(f"  Total elements: {tx_1p5d_convex.n_elements}")
+    print(f"  ROC: {tx_1p5d_convex.roc}m (>0 = convex)")
+    z_positions = tx_1p5d_convex.element_positions[:, 2]
+    print(f"  Z-range: [{z_positions.min():.4f}, {z_positions.max():.4f}]m (curved)")
+    
+    # Test 7: 2D Matrix Convex Array (NEW!)
+    print("\n=== Test 7: 2D Matrix Convex Array ===")
+    tx_2d_convex = Transducer(n_cols=16, n_rows=16, pitch=0.0003, roc=0.06)
+    print(f"Created 2D matrix convex transducer:")
+    print(f"  n_cols={tx_2d_convex.n_cols}, n_rows={tx_2d_convex.n_rows}")
+    print(f"  Total elements: {tx_2d_convex.n_elements}")
+    print(f"  ROC: {tx_2d_convex.roc}m (>0 = convex)")
+    z_positions = tx_2d_convex.element_positions[:, 2]
+    print(f"  Z-range: [{z_positions.min():.4f}, {z_positions.max():.4f}]m (curved)")
+    
+    # Test 8: BLI Mask Generation
+    print("\n=== Test 8: BLI Mask Generation ===")
+    points = tx_linear.generate_element_surface_points(0, n_points_x=5, n_points_y=5)
+    print(f"Generated {len(points)} surface points")
+    indices, weights = tx_linear.create_element_mask(grid, 0, n_points_x=5, n_points_y=5)
     print(f"Sparse entries: {len(weights)}")
     print(f"Weight sum: {weights.sum():.6f} (should be ~1.0)")
     
-    # Test 5: 3D focusing
-    print("\n=== Test 5: 3D Focusing ===")
-    delays = tx2d.delays_for_focus((0.0, 0.0, 0.03))
-    print(f"Delay range: [{delays.min()*1e6:.3f}, {delays.max()*1e6:.3f}]µs")
+    # Test 9: Focusing and steering
+    print("\n=== Test 9: 3D Focusing ===")
+    delays_linear = tx_linear.delays_for_focus((0.0, 0.0, 0.03))
+    print(f"Linear 1D array delay range: [{delays_linear.min()*1e6:.3f}, {delays_linear.max()*1e6:.3f}]µs")
     
-    print("\n✓ All tests completed")
+    delays_convex = tx_convex.delays_for_focus((0.0, 0.0, 0.03))
+    print(f"Convex 1D array delay range: [{delays_convex.min()*1e6:.3f}, {delays_convex.max()*1e6:.3f}]µs")
+    
+    delays_1p5d_convex = tx_1p5d_convex.delays_for_focus((0.0, 0.0, 0.03))
+    print(f"1.5D convex array delay range: [{delays_1p5d_convex.min()*1e6:.3f}, {delays_1p5d_convex.max()*1e6:.3f}]µs")
+    
+    print("\n" + "="*70)
+    print("✓ All tests completed successfully!")
+    print("\nSummary:")
+    print("  • Linear (1D): n_cols=N, n_rows=1, roc=0")
+    print("  • Convex (1D): n_cols=N, n_rows=1, roc>0")
+    print("  • 1.5D Linear:  n_cols=N, n_rows=3-7, roc=0")
+    print("  • 1.5D Convex:  n_cols=N, n_rows=3-7, roc>0 (NEW!)")
+    print("  • 2D Matrix Linear: n_cols=N, n_rows=N, roc=0")
+    print("  • 2D Matrix Convex: n_cols=N, n_rows=N, roc>0 (NEW!)")
+    print("  • Backward compatibility maintained with n_elements_x/y")
