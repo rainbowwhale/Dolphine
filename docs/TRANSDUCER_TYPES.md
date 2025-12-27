@@ -8,8 +8,10 @@ Dolphine supports a unified transducer class that handles all ultrasound array t
 
 1. **Linear (1D) Transducer** - Single row of elements for 2D imaging (roc=0)
 2. **Convex (1D) Transducer** - Curved single row for wider field of view (roc>0)
-3. **1.5D Transducer** - Multiple rows (typically 3-7) with variable heights for elevation focusing (roc=0)
-4. **2D Matrix Transducer** - Large 2D grid (10s-100s of elements) for 3D volumetric imaging (roc=0)
+3. **1.5D Linear Transducer** - Multiple rows (typically 3-7) with variable heights for elevation focusing (roc=0)
+4. **1.5D Convex Transducer** - Multiple rows with lateral curvature for wide FOV and elevation control (roc>0) **NEW!**
+5. **2D Matrix Linear Transducer** - Large 2D grid (10s-100s of elements) for 3D volumetric imaging (roc=0)
+6. **2D Matrix Convex Transducer** - Large 2D curved grid for 3D imaging with wide FOV (roc>0) **NEW!**
 
 ### Unified Interface
 
@@ -17,6 +19,8 @@ All transducer types use a consistent interface with three key parameters:
 - **n_cols**: Number of columns (lateral/x direction)
 - **n_rows**: Number of rows (elevation/y direction), default=1
 - **roc**: Radius of curvature (m). Use 0 or None for linear arrays, >0 for convex arrays.
+  - **Applies to all array types**: The ROC parameter now works with 1D, 1.5D, and 2D arrays!
+  - **Lateral curvature**: All rows follow the same curved arc in the x-z plane
 
 ## 1. Linear (1D) Transducer
 
@@ -237,7 +241,54 @@ tx_large = Transducer(
 
 ---
 
-## 4. 2D Matrix Transducer
+## 4. 1.5D Convex Transducer (NEW!)
+
+### Description
+A 1.5D convex array combines the benefits of convex (curved) arrays with multi-row elevation control. All rows follow the same curved arc in the lateral direction, providing a wider field of view while maintaining electronic elevation focusing.
+
+### Key Features
+- Multiple rows (3-7 typical) on curved surface
+- Lateral curvature for wider field of view (controlled by ROC)
+- Variable row heights for optimized beam profile
+- Electronic elevation focusing
+- Combines benefits of convex and 1.5D arrays
+
+### Usage
+```python
+from transducer import Transducer
+
+# Variable row heights with convex curvature
+row_heights = [0.0003, 0.0004, 0.0005, 0.0004, 0.0003]  # meters
+
+tx = Transducer(
+    n_cols=64,               # Elements per row
+    row_heights=row_heights, # 5 rows with variable heights
+    pitch=0.0003,            # Lateral pitch
+    row_pitch=0.0004,        # Elevation pitch
+    roc=0.05,                # 50mm radius of curvature (convex!)
+    center_freq=5e6
+)
+
+# All rows follow the same curved arc
+print(f"ROC: {tx.roc}m")
+z_range = tx.element_positions[:, 2]
+print(f"Z range: {z_range.min():.4f} to {z_range.max():.4f}m (curved)")
+```
+
+### ROC Guidelines for 1.5D Convex
+- **40-60mm ROC**: Standard for cardiac imaging
+- **60-80mm ROC**: Gentler curve for abdominal imaging
+- Curvature applies to lateral direction; rows are straight in elevation
+
+### Applications
+- Cardiac imaging with wide FOV and elevation control
+- Enhanced abdominal imaging
+- Deep tissue imaging with multi-row capability
+- Applications requiring both wide FOV and elevation focusing
+
+---
+
+## 5. 2D Matrix Transducer
 
 ### Description
 A 2D matrix array has a large grid of elements (tens to hundreds of rows and columns) allowing full 3D electronic beam steering and focusing without mechanical scanning.
@@ -348,23 +399,70 @@ weighted_signal = signal * apod_2d
 
 ---
 
+## 6. 2D Matrix Convex Transducer (NEW!)
+
+### Description
+A 2D matrix convex array combines large-scale 2D element grids with lateral curvature. All rows follow the same curved arc, providing full 3D electronic beam control with a wider field of view than flat matrix arrays.
+
+### Key Features
+- Large 2D element grid on curved surface (typical: 16×16 to 128×128)
+- Lateral curvature for wider field of view (controlled by ROC)
+- Uniform element dimensions
+- Full 3D electronic beam steering and focusing
+- Maximum flexibility in beam control
+
+### Usage
+```python
+from transducer import Transducer
+
+tx = Transducer(
+    n_cols=32,                # Elements in X
+    n_rows=32,                # Elements in Y
+    pitch=0.0003,             # 0.3mm pitch (both directions)
+    element_width=0.00028,    # Element width
+    element_height=0.00028,   # Element height
+    roc=0.06,                 # 60mm radius of curvature (convex!)
+    center_freq=5e6
+)
+
+# All rows follow the same curved arc
+print(f"Total elements: {tx.n_elements}")  # 32 × 32 = 1024
+print(f"ROC: {tx.roc}m")
+z_range = tx.element_positions[:, 2]
+print(f"Z range: {z_range.min():.4f} to {z_range.max():.4f}m (curved)")
+```
+
+### ROC Guidelines for 2D Convex
+- **50-70mm ROC**: Standard for cardiac volumetric imaging
+- **70-100mm ROC**: Gentler curve for deep tissue 3D imaging
+- Larger arrays may require larger ROC to maintain reasonable angular span
+
+### Applications
+- 3D/4D cardiac imaging with wide FOV
+- Volumetric imaging with curved aperture
+- Deep tissue 3D imaging
+- Applications requiring maximum beam control flexibility
+- Real-time volumetric blood flow imaging
+
+---
+
 ## Comparison Table
 
-| Feature | Linear (1D) | Convex (1D) | 1.5D | 2D Matrix |
-|---------|-------------|-------------|------|-----------|
-| **Interface** | n_cols=N, n_rows=1, roc=0 | n_cols=N, n_rows=1, roc>0 | n_cols=N, n_rows=3-7, roc=0 | n_cols=N, n_rows=N, roc=0 |
-| **Elements** | 64-256 | 64-256 | 96-448 total | 256-16,384 |
-| **Geometry** | Flat | Curved | Flat | Flat |
-| **ROC** | 0 (linear) | 20-100mm | 0 (linear) | 0 (linear) |
-| **Focusing** | X-Z plane only | X-Z plane only | X-Z with elevation | Full 3D |
-| **Steering** | Azimuth only | Azimuth only | Azimuth + limited elevation | Full 3D |
-| **Elevation** | Fixed (lens) | Fixed (lens) | Electronic | Electronic |
-| **Field of View** | Rectangular | Fan-shaped (wider) | Rectangular | Pyramidal |
-| **Complexity** | Low | Low | Medium | High |
-| **Cost** | Low | Low-Medium | Medium | High |
-| **Imaging** | 2D | 2D (wider FOV) | Enhanced 2D | 3D/4D |
-| **Frame Rate** | High | High | High | Lower (volume) |
-| **Applications** | General 2D | Deep tissue, cardiac | Cardiac, enhanced 2D | Volumetric, 4D |
+| Feature | Linear (1D) | Convex (1D) | 1.5D Linear | 1.5D Convex | 2D Linear | 2D Convex |
+|---------|-------------|-------------|-------------|-------------|-----------|-----------|
+| **Interface** | n_cols=N, n_rows=1, roc=0 | n_cols=N, n_rows=1, roc>0 | n_cols=N, n_rows=3-7, roc=0 | n_cols=N, n_rows=3-7, roc>0 | n_cols=N, n_rows=N, roc=0 | n_cols=N, n_rows=N, roc>0 |
+| **Elements** | 64-256 | 64-256 | 96-448 total | 96-448 total | 256-16,384 | 256-16,384 |
+| **Geometry** | Flat | Curved | Flat | Curved | Flat | Curved |
+| **ROC** | 0 (linear) | 20-100mm | 0 (linear) | 40-80mm | 0 (linear) | 50-100mm |
+| **Focusing** | X-Z plane only | X-Z plane only | X-Z with elevation | X-Z with elevation | Full 3D | Full 3D |
+| **Steering** | Azimuth only | Azimuth only | Azimuth + limited elevation | Azimuth + limited elevation | Full 3D | Full 3D |
+| **Elevation** | Fixed (lens) | Fixed (lens) | Electronic | Electronic | Electronic | Electronic |
+| **Field of View** | Rectangular | Fan-shaped (wider) | Rectangular | Fan-shaped (wider) | Pyramidal | Pyramidal (wider) |
+| **Complexity** | Low | Low | Medium | Medium | High | High |
+| **Cost** | Low | Low-Medium | Medium | Medium | High | High |
+| **Imaging** | 2D | 2D (wider FOV) | Enhanced 2D | Enhanced 2D (wider FOV) | 3D/4D | 3D/4D (wider FOV) |
+| **Frame Rate** | High | High | High | High | Lower (volume) | Lower (volume) |
+| **Applications** | General 2D | Deep tissue, cardiac | Cardiac, enhanced 2D | Cardiac with wide FOV | Volumetric, 4D | Volumetric with wide FOV |
 
 ---
 
@@ -382,10 +480,16 @@ tx_linear = Transducer(n_cols=64, n_rows=1, pitch=0.0003, roc=0)
 tx_convex = Transducer(n_cols=64, n_rows=1, pitch=0.0004, roc=0.05)
 
 # 1.5D Linear
-tx_1p5d = Transducer(n_cols=32, n_rows=5, pitch=0.0003, row_pitch=0.0004, roc=0)
+tx_1p5d_linear = Transducer(n_cols=32, n_rows=5, pitch=0.0003, row_pitch=0.0004, roc=0)
 
-# 2D Matrix
-tx_2d = Transducer(n_cols=32, n_rows=32, pitch=0.0003, roc=0)
+# 1.5D Convex (NEW!)
+tx_1p5d_convex = Transducer(n_cols=32, n_rows=5, pitch=0.0003, row_pitch=0.0004, roc=0.05)
+
+# 2D Matrix Linear
+tx_2d_linear = Transducer(n_cols=32, n_rows=32, pitch=0.0003, roc=0)
+
+# 2D Matrix Convex (NEW!)
+tx_2d_convex = Transducer(n_cols=32, n_rows=32, pitch=0.0003, roc=0.06)
 ```
 
 ---
