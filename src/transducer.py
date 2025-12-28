@@ -1,28 +1,24 @@
 """
-Clean BLI Implementation - Unified Transducer Class
+Transducer Module - Clean Implementation
 
-Based on feedback and reference DOI: 10.1121/1.5116132
+Ultrasound transducer array modeling with acoustic lens support.
 
-Key corrections:
-1. BLI formula: sinc((point_pos - grid_pos) / grid_spacing) per axis, multiply together
-2. Element size only determines number of sample points, NOT interpolation calculation
-3. Returns sparse format (indices, weights) for direct use in source injection
-4. Supports staggered grids: 3 separate velocity component masks
-5. GPU acceleration with CuPy
-
-Unified design:
-- Single Transducer class supports all array types (1D, 1.5D, 2D matrix, curved/concave).
-- 3D element positions (x, y, z) for concave transducer support.
-- Configurable element layout via element_positions parameter.
+This is a clean implementation (not refactoring) with the following features:
+- N x M array structure (n_cols x n_rows)
+- Element properties: position (3D), angle, size (width x height)
+- Array ROC (radius of curvature)
+- Multi-layer acoustic lens support with elevational ROC
+- Array dimension calculations
+- Plotting functions for element array and lens shape
 """
 import numpy as np
-import warnings
 
 try:
-    from scipy.signal import windows as signal_windows
-    HAS_SCIPY_WINDOWS = True
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D
+    HAS_MATPLOTLIB = True
 except ImportError:
-    HAS_SCIPY_WINDOWS = False
+    HAS_MATPLOTLIB = False
 
 try:
     import cupy as cp
@@ -32,353 +28,485 @@ except ImportError:
     HAS_CUPY = False
 
 
-class Transducer:
-    """Unified transducer element geometry and beamforming utilities.
+class LensLayer:
+    """Single layer of an acoustic lens.
     
-    Supports all transducer array types with a common interface:
-    - Linear (1D): n_cols elements, n_rows=1, roc=0 (or None)
-    - Convex (1D): n_cols elements, n_rows=1, roc > 0 (radius of curvature)
-    - 1.5D Linear: n_cols × n_rows elements (3-7 rows typical), roc=0 (or None)
-    - 1.5D Convex: n_cols × n_rows elements (3-7 rows typical), roc > 0
-    - 2D Matrix Linear: n_cols × n_rows elements (large grids), roc=0 (or None)
-    - 2D Matrix Convex: n_cols × n_rows elements (large grids), roc > 0
-    
-    Key parameters:
-    - n_cols (or n_elements_x): Number of columns (lateral direction)
-    - n_rows (or n_elements_y): Number of rows (elevation direction), default=1
-    - roc: Radius of curvature (m). Use 0 or None for linear/flat arrays,
-           positive value for convex arrays. Applies lateral curvature to all rows.
-           Default=None (linear).
-    
-    Includes band-limited interpolation (BLI) for distributed source injection.
-    Reference: https://doi.org/10.1121/1.5116132
+    Attributes:
+        elevational_roc: Radius of curvature in elevation direction (m).
+                        Positive = convex, Negative = concave, 0 or inf = flat.
+        max_thickness: Maximum thickness of the lens layer (m).
+        speed_of_sound: Speed of sound in the lens material (m/s).
+        density: Density of the lens material (kg/m³).
+        name: Optional name/identifier for the layer.
     """
-    # Default configuration constants
-    DEFAULT_ROW_HEIGHT = 0.0004  # Default row height in meters (0.4mm) for 1.5D arrays
     
-    def _generate_convex_positions(self, n_cols, n_rows, pitch, row_pitch, roc):
-        """Generate element positions for a convex array.
-        
-        Supports both single-row (1D convex) and multi-row (1.5D/2D convex) arrays.
-        For multi-row arrays, all rows follow the same curved arc in the x-z plane,
-        with rows distributed along the y-axis.
+    def __init__(self, elevational_roc: float, max_thickness: float,
+                 speed_of_sound: float = 1000.0, density: float = 1100.0,
+                 name: str = ""):
+        """Initialize a lens layer.
         
         Args:
-            n_cols: Number of columns (elements per row)
-            n_rows: Number of rows
-            pitch: Element pitch in lateral direction (m)
-            row_pitch: Element pitch in elevation direction (m)
-            roc: Radius of curvature (m)
+            elevational_roc: Radius of curvature in elevation (m).
+                           Positive for convex, negative for concave, 0/inf for flat.
+            max_thickness: Maximum thickness of the layer (m).
+            speed_of_sound: Speed of sound in lens material (m/s). Default 1000 m/s.
+            density: Density of lens material (kg/m³). Default 1100 kg/m³.
+            name: Optional name for the layer.
+        """
+        self.elevational_roc = elevational_roc
+        self.max_thickness = max_thickness
+        self.speed_of_sound = speed_of_sound
+        self.density = density
+        self.name = name
+    
+    @property
+    def is_convex(self) -> bool:
+        """Check if the lens layer is convex."""
+        return self.elevational_roc > 0 and np.isfinite(self.elevational_roc)
+    
+    @property
+    def is_concave(self) -> bool:
+        """Check if the lens layer is concave."""
+        return self.elevational_roc < 0
+    
+    @property
+    def is_flat(self) -> bool:
+        """Check if the lens layer is flat."""
+        return self.elevational_roc == 0 or not np.isfinite(self.elevational_roc)
+    
+    def get_thickness_profile(self, y_positions: np.ndarray) -> np.ndarray:
+        """Calculate thickness profile along elevation direction.
+        
+        Args:
+            y_positions: Array of y-positions (elevation) in meters.
             
         Returns:
-            element_positions: Array of shape (n_cols*n_rows, 3) with (x, y, z) coordinates
+            thickness: Array of thickness values at each y-position.
         """
-        # Calculate arc for x-z plane (lateral curvature)
-        arc_length = (n_cols - 1) * pitch
-        theta_span = arc_length / roc  # Total angular span (radians)
-        thetas = np.linspace(-theta_span/2, theta_span/2, n_cols)
+        if self.is_flat:
+            return np.full_like(y_positions, self.max_thickness, dtype=float)
         
-        # Positions on arc (x-z plane, centered at origin)
-        x_positions = roc * np.sin(thetas)
-        z_positions = roc * (1 - np.cos(thetas))
+        roc = abs(self.elevational_roc)
+        # Calculate lens surface profile using arc equation
+        # For convex: thicker in center, thinner at edges
+        # For concave: thinner in center, thicker at edges
         
-        # Y positions for multiple rows (elevation)
-        y_positions = (np.arange(n_rows) - (n_rows - 1) / 2.0) * row_pitch
+        # Clamp y_positions to valid range for arc calculation
+        y_clipped = np.clip(y_positions, -roc, roc)
         
-        # Create meshgrid for all elements
-        # Each row has the same x and z positions (same arc)
-        xx = np.tile(x_positions, n_rows)  # Repeat x positions for each row
-        yy = np.repeat(y_positions, n_cols)  # Each row gets its y position
-        zz = np.tile(z_positions, n_rows)  # Repeat z positions for each row
+        # Height of arc at each y position
+        arc_height = roc - np.sqrt(np.maximum(0, roc**2 - y_clipped**2))
         
-        return np.stack([xx, yy, zz], axis=1)
-    
-    def __init__(self, n_elements=64, pitch=0.0003, element_width=0.00028, kerf=0.00002,
-                 center_freq=5e6, c=1540.0, element_height=0.010,
-                 n_cols=None, n_rows=None, row_pitch=None, roc=None,
-                 element_positions=None, element_heights=None,
-                 # Legacy parameters for backward compatibility
-                 n_elements_x=None, n_elements_y=None,
-                 n_elements_per_row=None, row_heights=None):
-        """
-        Args:
-            n_elements: Number of transducer elements (for 1D linear arrays, or overridden)
-            pitch: Center-to-center spacing between elements (m)
-            element_width: Width of each element (lateral, m)
-            kerf: Gap between elements (m)
-            center_freq: Center frequency (Hz)
-            c: Speed of sound (m/s)
-            element_height: Height of element (elevation, m) - default for all elements
-            n_cols: Number of columns (lateral/x direction). Preferred over n_elements_x.
-            n_rows: Number of rows (elevation/y direction). Default=1 for 1D arrays.
-            row_pitch: Center-to-center spacing between rows (elevation, m) - for 1.5D/2D arrays
-            roc: Radius of curvature (m). None or 0 for linear arrays, >0 for convex arrays.
-                 For convex arrays, automatically generates curved element positions.
-            element_positions: Custom 3D positions array (N, 3) for (x, y, z) coordinates.
-                              If provided, overrides automatic position generation.
-                              Overrides roc parameter.
-            element_heights: Per-element heights array (N,) for variable height elements.
-                            If None, uses uniform element_height for all elements.
-            n_elements_x: Legacy alias for n_cols (backward compatibility)
-            n_elements_y: Legacy alias for n_rows (backward compatibility)
-            n_elements_per_row: Legacy alias for n_cols (1.5D compatibility)
-            row_heights: Per-row heights array for 1.5D transducers. When provided,
-                        element_heights is generated by assigning each element in a row
-                        the corresponding row height.
-        """
-        self.pitch = pitch
-        self.element_width = element_width
-        self.kerf = kerf
-        self.center_freq = center_freq
-        self.c = c
-        self.element_height = element_height
-        self.roc = roc if roc is not None else 0  # Store ROC, default to 0 (linear)
-        
-        # Normalize parameter names: n_cols and n_rows are preferred
-        # Handle legacy parameter aliases for backward compatibility
-        if n_cols is None:
-            if n_elements_x is not None:
-                n_cols = n_elements_x
-            elif n_elements_per_row is not None:
-                n_cols = n_elements_per_row
-        
-        if n_rows is None:
-            if n_elements_y is not None:
-                n_rows = n_elements_y
-        
-        # Handle row_heights for 1.5D transducers
-        if row_heights is not None:
-            row_heights = np.atleast_1d(row_heights)
-            if row_heights.size == 1:
-                # Single height value - need n_rows
-                if n_rows is None:
-                    n_rows = 5  # Default
-                self.row_heights = np.full(n_rows, float(row_heights[0]))
-            else:
-                # Array of heights - derive n_rows
-                self.row_heights = np.array(row_heights)
-                if n_rows is not None and n_rows != len(self.row_heights):
-                    raise ValueError(f"n_rows ({n_rows}) doesn't match row_heights length ({len(self.row_heights)})")
-                n_rows = len(self.row_heights)
-            # Generate per-element heights from row_heights (variable heights per row)
-            # All elements in a row get the same height
-            if n_cols is not None:
-                element_heights = np.repeat(self.row_heights, n_cols)
+        if self.is_convex:
+            # Convex: max thickness at center (y=0), decreasing toward edges
+            thickness = self.max_thickness - arc_height
         else:
-            # No row_heights specified - use uniform heights
-            if n_rows is None:
-                n_rows = 1
-            
-            # For 1.5D arrays (when using n_elements_per_row), create element_heights
-            # For 2D matrix arrays (when using n_elements_x/n_cols without n_elements_per_row),
-            # keep element_heights as None for uniform heights
-            if n_elements_per_row is not None and n_rows > 1:
-                # This is a 1.5D array - populate element_heights
-                self.row_heights = np.full(n_rows, self.DEFAULT_ROW_HEIGHT)
-                if n_cols is not None:
-                    element_heights = np.repeat(self.row_heights, n_cols)
-            else:
-                # This is a 2D matrix or 1D linear - use uniform heights
-                self.row_heights = np.full(n_rows, self.element_height)
-                # Don't set element_heights - keep it None for uniform heights
+            # Concave: min thickness at center, increasing toward edges
+            thickness = arc_height + (self.max_thickness - arc_height.max())
         
-        # Set row_pitch default
-        if row_pitch is None:
-            row_pitch = 0.0004 if n_rows > 1 else pitch
-        self.row_pitch = row_pitch
-        
-        # Handle custom element positions (for custom geometries)
-        if element_positions is not None:
-            element_positions = np.asarray(element_positions)
-            if element_positions.ndim != 2 or element_positions.shape[1] != 3:
-                raise ValueError("element_positions must be shape (N, 3) for (x, y, z) coordinates")
-            self.element_positions = element_positions
-            self.n_elements = element_positions.shape[0]
-            # Infer n_cols and n_rows from custom positions if not provided
-            if n_cols is None:
-                n_cols = self.n_elements
-            if n_rows is None:
-                n_rows = 1
-        else:
-            # Generate positions based on array configuration
-            if n_cols is not None and n_rows is not None:
-                # 2D array (matrix or 1.5D style) or 1D array
-                if self.roc > 0:
-                    # Convex array with curvature (supports 1D, 1.5D, and 2D)
-                    self.n_elements = n_cols * n_rows
-                    self.n_cols = n_cols
-                    self.n_rows = n_rows
-                    self.element_positions = self._generate_convex_positions(
-                        n_cols, n_rows, pitch, self.row_pitch, self.roc
-                    )
-                else:
-                    # Linear array (flat)
-                    self.n_cols = n_cols
-                    self.n_rows = n_rows
-                    self.n_elements = n_cols * n_rows
-                    
-                    # Generate 2D element positions (centered)
-                    x_positions = (np.arange(n_cols) - (n_cols - 1) / 2.0) * pitch
-                    y_positions = (np.arange(n_rows) - (n_rows - 1) / 2.0) * self.row_pitch
-                    
-                    xx, yy = np.meshgrid(x_positions, y_positions, indexing='xy')
-                    
-                    # 3D positions with z=0 (flat transducer surface)
-                    self.element_positions = np.stack([
-                        xx.flatten(),
-                        yy.flatten(),
-                        np.zeros(self.n_elements)
-                    ], axis=1)
-            else:
-                # 1D linear array (legacy: using n_elements)
-                if n_cols is None:
-                    n_cols = n_elements
-                if n_rows is None:
-                    n_rows = 1
-                    
-                self.n_elements = n_cols
-                self.n_cols = n_cols
-                self.n_rows = n_rows
-                
-                if self.roc > 0:
-                    # Convex 1D array
-                    self.element_positions = self._generate_convex_positions(
-                        n_cols, n_rows, pitch, self.row_pitch, self.roc
-                    )
-                else:
-                    # Linear 1D array
-                    x_positions = (np.arange(n_cols) - (n_cols - 1) / 2.0) * pitch
-                    
-                    # 3D positions with y=0 and z=0
-                    self.element_positions = np.stack([
-                        x_positions,
-                        np.zeros_like(x_positions),
-                        np.zeros_like(x_positions)
-                    ], axis=1)
-        
-        # Ensure n_cols and n_rows are set
-        if not hasattr(self, 'n_cols'):
-            self.n_cols = n_cols if n_cols is not None else self.n_elements
-        if not hasattr(self, 'n_rows'):
-            self.n_rows = n_rows if n_rows is not None else 1
-        
-        # Set legacy aliases for backward compatibility
-        self.n_elements_x = self.n_cols
-        self.n_elements_y = self.n_rows
-        self.n_elements_per_row = self.n_cols
-        
-        # Per-element heights (None means uniform element_height for all)
-        if element_heights is not None:
-            element_heights = np.asarray(element_heights)
-            if len(element_heights) != self.n_elements:
-                raise ValueError(f"element_heights length ({len(element_heights)}) must match n_elements ({self.n_elements})")
-            self.element_heights = element_heights
-        else:
-            self.element_heights = None
-        
-        # Cache for BLI star (reusable across elements)
-        self._bli_star_cache = {}
-        
-        # Cache for weight grid (reusable across elements to avoid reallocating)
-        self._weight_grid_cache = {}
+        # Ensure non-negative thickness
+        return np.maximum(0, thickness)
 
-    def get_element_row_col(self, element_idx):
-        """Get the row and column indices for a given element index.
-        
-        For 1D arrays, row is always 0 and col equals the element index.
-        For 2D arrays, elements are numbered in row-major order.
+
+class AcousticLens:
+    """Multi-layer acoustic lens for ultrasound transducers.
+    
+    Supports multiple lens layers with different properties for
+    complex lens designs used in medical ultrasound transducers.
+    
+    Attributes:
+        layers: List of LensLayer objects.
+    """
+    
+    def __init__(self, layers: list = None):
+        """Initialize an acoustic lens.
         
         Args:
-            element_idx: Linear element index (0 to n_elements-1)
+            layers: List of LensLayer objects. If None, creates an empty lens.
+        """
+        self.layers = layers if layers is not None else []
+    
+    def add_layer(self, layer: LensLayer):
+        """Add a layer to the lens.
+        
+        Args:
+            layer: LensLayer object to add.
+        """
+        self.layers.append(layer)
+    
+    @property
+    def n_layers(self) -> int:
+        """Number of layers in the lens."""
+        return len(self.layers)
+    
+    @property
+    def total_max_thickness(self) -> float:
+        """Total maximum thickness of all layers."""
+        if not self.layers:
+            return 0.0
+        return sum(layer.max_thickness for layer in self.layers)
+    
+    def get_total_thickness_profile(self, y_positions: np.ndarray) -> np.ndarray:
+        """Calculate total thickness profile of all layers.
+        
+        Args:
+            y_positions: Array of y-positions (elevation) in meters.
             
         Returns:
-            (row_idx, col_idx): Row and column indices
+            total_thickness: Array of total thickness values at each y-position.
+        """
+        if not self.layers:
+            return np.zeros_like(y_positions, dtype=float)
+        
+        total = np.zeros_like(y_positions, dtype=float)
+        for layer in self.layers:
+            total += layer.get_thickness_profile(y_positions)
+        return total
+    
+    def get_layer_boundaries(self, y_positions: np.ndarray) -> list:
+        """Calculate z-positions of layer boundaries.
+        
+        Args:
+            y_positions: Array of y-positions (elevation) in meters.
+            
+        Returns:
+            boundaries: List of arrays, each containing z-positions
+                       of the boundary between layers.
+        """
+        if not self.layers:
+            return []
+        
+        boundaries = []
+        cumulative_z = np.zeros_like(y_positions, dtype=float)
+        
+        for layer in self.layers:
+            thickness = layer.get_thickness_profile(y_positions)
+            cumulative_z = cumulative_z + thickness
+            boundaries.append(cumulative_z.copy())
+        
+        return boundaries
+
+
+class Transducer:
+    """Ultrasound transducer array with acoustic lens support.
+    
+    Models an N x M array of transducer elements where:
+    - N = n_cols (number of columns, lateral direction)
+    - M = n_rows (number of rows, elevation direction)
+    
+    Each element has:
+    - 3D position (x, y, z)
+    - Normal angle (for curved arrays)
+    - Size (width x height)
+    
+    The array can have:
+    - Radius of curvature (ROC) for curved arrays
+    - Multi-layer acoustic lens with elevational focusing
+    
+    Attributes:
+        n_cols: Number of columns (lateral direction).
+        n_rows: Number of rows (elevation direction).
+        n_elements: Total number of elements (n_cols * n_rows).
+        pitch: Lateral pitch (element spacing in x-direction) in meters.
+        row_pitch: Elevation pitch (element spacing in y-direction) in meters.
+        element_width: Width of each element (lateral) in meters.
+        element_height: Height of each element (elevation) in meters.
+        kerf: Gap between elements in meters.
+        roc: Radius of curvature of the array (0 for flat).
+        center_freq: Center frequency in Hz.
+        speed_of_sound: Speed of sound in medium (m/s).
+        element_positions: (N, 3) array of element center positions.
+        element_angles: (N, 2) array of element normal angles (theta_x, theta_y).
+        lens: AcousticLens object for lens modeling.
+    """
+    
+    def __init__(self, n_cols: int, n_rows: int,
+                 pitch: float = 0.0003, row_pitch: float = None,
+                 element_width: float = None, element_height: float = None,
+                 kerf: float = 0.00002,
+                 roc: float = 0.0,
+                 center_freq: float = 5e6, speed_of_sound: float = 1540.0,
+                 lens: AcousticLens = None):
+        """Initialize the transducer array.
+        
+        Args:
+            n_cols: Number of columns (lateral/x direction).
+            n_rows: Number of rows (elevation/y direction).
+            pitch: Center-to-center spacing between columns (m). Default 0.3mm.
+            row_pitch: Center-to-center spacing between rows (m). Default equals pitch.
+            element_width: Width of each element (m). Default pitch - kerf.
+            element_height: Height of each element (m). Default row_pitch - kerf.
+            kerf: Gap between elements (m). Default 0.02mm.
+            roc: Radius of curvature (m). 0 for flat array, >0 for convex.
+            center_freq: Center frequency (Hz). Default 5 MHz.
+            speed_of_sound: Speed of sound in medium (m/s). Default 1540 m/s.
+            lens: AcousticLens object. Default None (no lens).
+        """
+        # Array dimensions
+        self.n_cols = n_cols
+        self.n_rows = n_rows
+        self.n_elements = n_cols * n_rows
+        
+        # Element spacing
+        self.pitch = pitch
+        self.row_pitch = row_pitch if row_pitch is not None else pitch
+        self.kerf = kerf
+        
+        # Element dimensions
+        self.element_width = element_width if element_width is not None else (pitch - kerf)
+        self.element_height = element_height if element_height is not None else (self.row_pitch - kerf)
+        
+        # Array curvature
+        self.roc = roc
+        
+        # Acoustic properties
+        self.center_freq = center_freq
+        self.speed_of_sound = speed_of_sound
+        
+        # Acoustic lens
+        self.lens = lens if lens is not None else AcousticLens()
+        
+        # Generate element positions and angles
+        self._generate_element_geometry()
+    
+    def _generate_element_geometry(self):
+        """Generate element positions and normal angles based on array geometry."""
+        # Calculate element positions
+        if self.roc > 0:
+            # Curved array (convex)
+            self.element_positions, self.element_angles = self._generate_curved_geometry()
+        else:
+            # Flat array
+            self.element_positions, self.element_angles = self._generate_flat_geometry()
+    
+    def _generate_flat_geometry(self) -> tuple:
+        """Generate positions and angles for a flat array.
+        
+        Returns:
+            positions: (N, 3) array of element positions.
+            angles: (N, 2) array of element normal angles.
+        """
+        # X positions (lateral) - centered at origin
+        x_positions = (np.arange(self.n_cols) - (self.n_cols - 1) / 2.0) * self.pitch
+        
+        # Y positions (elevation) - centered at origin
+        y_positions = (np.arange(self.n_rows) - (self.n_rows - 1) / 2.0) * self.row_pitch
+        
+        # Create meshgrid (row-major order: iterate over rows first)
+        xx, yy = np.meshgrid(x_positions, y_positions, indexing='xy')
+        
+        # All elements at z=0 for flat array
+        zz = np.zeros_like(xx)
+        
+        # Stack into (N, 3) array
+        positions = np.stack([xx.flatten(), yy.flatten(), zz.flatten()], axis=1)
+        
+        # All elements have normal pointing in +z direction (angle = 0, 0)
+        angles = np.zeros((self.n_elements, 2))
+        
+        return positions, angles
+    
+    def _generate_curved_geometry(self) -> tuple:
+        """Generate positions and angles for a curved (convex) array.
+        
+        The curvature is applied in the lateral (x-z) plane.
+        All rows follow the same curved arc.
+        
+        Returns:
+            positions: (N, 3) array of element positions.
+            angles: (N, 2) array of element normal angles (theta_x, theta_y).
+        """
+        # Calculate angular positions for lateral curvature
+        arc_length = (self.n_cols - 1) * self.pitch
+        theta_span = arc_length / self.roc  # Total angular span
+        thetas = np.linspace(-theta_span / 2, theta_span / 2, self.n_cols)
+        
+        # X and Z positions on the curved arc
+        x_positions = self.roc * np.sin(thetas)
+        z_positions = self.roc * (1 - np.cos(thetas))
+        
+        # Y positions (elevation) - centered at origin
+        y_positions = (np.arange(self.n_rows) - (self.n_rows - 1) / 2.0) * self.row_pitch
+        
+        # Create full arrays for all elements (row-major order)
+        xx = np.tile(x_positions, self.n_rows)
+        yy = np.repeat(y_positions, self.n_cols)
+        zz = np.tile(z_positions, self.n_rows)
+        
+        positions = np.stack([xx, yy, zz], axis=1)
+        
+        # Element angles: theta_x varies with lateral position, theta_y = 0
+        theta_x = np.tile(thetas, self.n_rows)
+        theta_y = np.zeros(self.n_elements)
+        
+        angles = np.stack([theta_x, theta_y], axis=1)
+        
+        return positions, angles
+    
+    # ===== Array Properties =====
+    
+    @property
+    def array_width(self) -> float:
+        """Width of the array (lateral dimension) in meters."""
+        return (self.n_cols - 1) * self.pitch + self.element_width
+    
+    @property
+    def array_height(self) -> float:
+        """Height of the array (elevation dimension) in meters."""
+        return (self.n_rows - 1) * self.row_pitch + self.element_height
+    
+    @property
+    def array_size(self) -> tuple:
+        """Size of the array as (width, height) in meters."""
+        return (self.array_width, self.array_height)
+    
+    @property
+    def min_dimension(self) -> float:
+        """Minimum dimension of the array in meters."""
+        return min(self.array_width, self.array_height)
+    
+    @property
+    def max_dimension(self) -> float:
+        """Maximum dimension of the array in meters."""
+        return max(self.array_width, self.array_height)
+    
+    @property
+    def wavelength(self) -> float:
+        """Wavelength at center frequency in meters."""
+        return self.speed_of_sound / self.center_freq
+    
+    @property
+    def x_positions(self) -> np.ndarray:
+        """X-coordinates of all element centers."""
+        return self.element_positions[:, 0]
+    
+    @property
+    def y_positions(self) -> np.ndarray:
+        """Y-coordinates of all element centers."""
+        return self.element_positions[:, 1]
+    
+    @property
+    def z_positions(self) -> np.ndarray:
+        """Z-coordinates of all element centers."""
+        return self.element_positions[:, 2]
+    
+    # ===== Element Access Methods =====
+    
+    def get_element_position(self, element_idx: int) -> np.ndarray:
+        """Get the 3D position of a specific element.
+        
+        Args:
+            element_idx: Element index (0 to n_elements-1).
+            
+        Returns:
+            position: (3,) array with (x, y, z) coordinates.
+        """
+        if element_idx < 0 or element_idx >= self.n_elements:
+            raise ValueError(f"Element index {element_idx} out of range [0, {self.n_elements})")
+        return self.element_positions[element_idx]
+    
+    def get_element_angle(self, element_idx: int) -> np.ndarray:
+        """Get the normal angles of a specific element.
+        
+        Args:
+            element_idx: Element index (0 to n_elements-1).
+            
+        Returns:
+            angles: (2,) array with (theta_x, theta_y) angles in radians.
+        """
+        if element_idx < 0 or element_idx >= self.n_elements:
+            raise ValueError(f"Element index {element_idx} out of range [0, {self.n_elements})")
+        return self.element_angles[element_idx]
+    
+    def get_element_size(self, element_idx: int = None) -> tuple:
+        """Get the size of an element.
+        
+        Args:
+            element_idx: Element index (optional, all elements have same size).
+            
+        Returns:
+            size: (width, height) tuple in meters.
+        """
+        return (self.element_width, self.element_height)
+    
+    def get_element_row_col(self, element_idx: int) -> tuple:
+        """Get the row and column indices for an element.
+        
+        Args:
+            element_idx: Linear element index (0 to n_elements-1).
+            
+        Returns:
+            (row_idx, col_idx): Row and column indices.
         """
         row_idx = element_idx // self.n_cols
         col_idx = element_idx % self.n_cols
         return row_idx, col_idx
-
-    def delays_for_focus(self, focus_point, speed_of_sound=None):
-        """Compute transmission delays for each element to focus at `focus_point`.
-        
-        Accepts either 2D (x, z) or 3D (x, y, z) focus point.
+    
+    def get_element_index(self, row: int, col: int) -> int:
+        """Get the linear element index from row and column.
         
         Args:
-            focus_point: Tuple (x, z) or (x, y, z) of focus point in meters
-            speed_of_sound: Speed of sound (m/s), uses self.c if None
+            row: Row index (0 to n_rows-1).
+            col: Column index (0 to n_cols-1).
             
         Returns:
-            delays: Array of delays for each element (seconds)
+            element_idx: Linear element index.
         """
-        if speed_of_sound is None:
-            c = self.c
-        else:
-            c = speed_of_sound
+        if row < 0 or row >= self.n_rows:
+            raise ValueError(f"Row {row} out of range [0, {self.n_rows})")
+        if col < 0 or col >= self.n_cols:
+            raise ValueError(f"Column {col} out of range [0, {self.n_cols})")
+        return row * self.n_cols + col
+    
+    # ===== Beamforming Methods =====
+    
+    def delays_for_focus(self, focus_point: tuple, speed_of_sound: float = None) -> np.ndarray:
+        """Compute transmission delays for focusing at a point.
         
-        # Handle both 2D and 3D focus points
+        Args:
+            focus_point: (x, y, z) or (x, z) focus point in meters.
+            speed_of_sound: Speed of sound (m/s). Uses self.speed_of_sound if None.
+            
+        Returns:
+            delays: Array of delays for each element (seconds).
+        """
+        c = speed_of_sound if speed_of_sound is not None else self.speed_of_sound
+        
+        # Handle 2D or 3D focus point
         if len(focus_point) == 2:
-            # 2D focus (x, z) - assume y=0
             focus_x, focus_z = focus_point
             focus_y = 0.0
         else:
             focus_x, focus_y, focus_z = focus_point
         
-        # Compute distances using 3D element positions
+        # Compute distances from each element to focus point
         dx = self.element_positions[:, 0] - focus_x
         dy = self.element_positions[:, 1] - focus_y
         dz = self.element_positions[:, 2] - focus_z
         
         distances = np.sqrt(dx**2 + dy**2 + dz**2)
+        
+        # Convert to delays and normalize
         delays = distances / c
         delays -= delays.min()
+        
         return delays
-
-    def delays_for_focus_3d(self, focus_point, speed_of_sound=None):
-        """Compute transmission delays for 3D focus point (x, y, z) in meters.
-        
-        .. deprecated::
-            This method is deprecated and will be removed in a future version.
-            Use delays_for_focus() instead, which accepts both 2D (x, z) and 3D (x, y, z) focus points.
+    
+    def delays_for_steering(self, steering_angles: tuple, speed_of_sound: float = None) -> np.ndarray:
+        """Compute transmission delays for beam steering.
         
         Args:
-            focus_point: Tuple (x, y, z) of focus point in meters
-            speed_of_sound: Speed of sound (m/s), uses self.c if None
+            steering_angles: (theta_x, theta_y) steering angles in radians.
+            speed_of_sound: Speed of sound (m/s). Uses self.speed_of_sound if None.
             
         Returns:
-            delays: Array of delays for each element (seconds)
+            delays: Array of delays for each element (seconds).
         """
-        warnings.warn(
-            "delays_for_focus_3d() is deprecated. Use delays_for_focus() instead, "
-            "which accepts both 2D and 3D focus points.",
-            DeprecationWarning,
-            stacklevel=2
-        )
-        return self.delays_for_focus(focus_point, speed_of_sound)
-
-    def delays_for_steering_3d(self, steering_angles, speed_of_sound=None):
-        """Compute transmission delays for 3D beam steering.
-        
-        Works for all transducer types. For curved transducers, the steering
-        is computed relative to each element's local position.
-        
-        Args:
-            steering_angles: Tuple (theta_x, theta_y) in radians
-                           theta_x: steering angle in x-z plane
-                           theta_y: steering angle in y-z plane
-            speed_of_sound: Speed of sound (m/s), uses self.c if None
-            
-        Returns:
-            delays: Array of delays for each element (seconds)
-        """
-        if speed_of_sound is None:
-            c = self.c
-        else:
-            c = speed_of_sound
+        c = speed_of_sound if speed_of_sound is not None else self.speed_of_sound
         
         theta_x, theta_y = steering_angles
         
-        # Compute delays based on plane wave steering using x and y positions
-        # For curved transducers, this uses the lateral positions
+        # Compute delays based on plane wave steering
         delays = (
             self.element_positions[:, 0] * np.sin(theta_x) +
             self.element_positions[:, 1] * np.sin(theta_y)
@@ -386,559 +514,593 @@ class Transducer:
         
         # Normalize to positive delays
         delays -= delays.min()
+        
         return delays
-
-    def apodization_hanning(self):
-        """Return Hanning apodization weights across elements."""
-        # Prefer SciPy's recommended Hann window implementation when available,
-        # but fall back to NumPy's deprecated np.hanning for backward compatibility.
-        if HAS_SCIPY_WINDOWS:
-            return signal_windows.hann(self.n_elements)
+    
+    def apodization_hanning(self) -> np.ndarray:
+        """Generate Hanning apodization weights.
+        
+        For 2D arrays, returns a 2D Hanning window flattened to 1D.
+        
+        Returns:
+            weights: Apodization weights for each element.
+        """
+        if self.n_rows == 1:
+            return np.hanning(self.n_cols)
         else:
-            return np.hanning(self.n_elements)
-
-    def map_to_grid(self, grid, z0=None):
-        """Map element centers to grid indices (ix, iy, iz) using Grid object.
-        
-        For curved transducers, uses the actual z-coordinate of each element.
-        For flat transducers, uses z0 if provided, otherwise element z-coordinate.
+            # 2D Hanning window
+            hann_x = np.hanning(self.n_cols)
+            hann_y = np.hanning(self.n_rows)
+            hann_2d = np.outer(hann_y, hann_x)
+            return hann_2d.flatten()
+    
+    # ===== Plotting Methods =====
+    
+    def plot_array(self, ax=None, show_elements: bool = True,
+                   show_normals: bool = False, normal_length: float = 0.001,
+                   figsize: tuple = (10, 8)):
+        """Plot the transducer element array.
         
         Args:
-            grid: Grid object with world_to_index method
-            z0: Optional z-position override. If None, uses element z-coordinates.
+            ax: Matplotlib axes (3D). Creates new figure if None.
+            show_elements: Show element rectangles.
+            show_normals: Show element normal vectors.
+            normal_length: Length of normal vectors in meters.
+            figsize: Figure size if creating new figure.
             
         Returns:
-            List of (ix, iy, iz) tuples for each element
+            ax: The matplotlib axes object.
         """
-        idx = []
+        if not HAS_MATPLOTLIB:
+            raise ImportError("Matplotlib is required for plotting. Install with: pip install matplotlib")
+        
+        if ax is None:
+            fig = plt.figure(figsize=figsize)
+            ax = fig.add_subplot(111, projection='3d')
+        
+        # Plot element centers
+        ax.scatter(
+            self.x_positions * 1e3,
+            self.y_positions * 1e3,
+            self.z_positions * 1e3,
+            c='blue', s=20, label='Element centers'
+        )
+        
+        # Plot element rectangles (simplified as points for now)
+        if show_elements:
+            for i in range(self.n_elements):
+                x, y, z = self.element_positions[i] * 1e3
+                w = self.element_width * 1e3 / 2
+                h = self.element_height * 1e3 / 2
+                
+                # Draw element outline (rectangle in x-y plane for flat array)
+                if self.roc == 0:
+                    rect_x = [x-w, x+w, x+w, x-w, x-w]
+                    rect_y = [y-h, y-h, y+h, y+h, y-h]
+                    rect_z = [z, z, z, z, z]
+                    ax.plot(rect_x, rect_y, rect_z, 'b-', alpha=0.5, linewidth=0.5)
+        
+        # Plot normal vectors
+        if show_normals:
+            for i in range(self.n_elements):
+                x, y, z = self.element_positions[i]
+                theta_x, theta_y = self.element_angles[i]
+                
+                # Normal direction
+                nx = np.sin(theta_x)
+                ny = np.sin(theta_y)
+                nz = np.cos(theta_x) * np.cos(theta_y)
+                
+                # Scale and plot
+                ax.quiver(
+                    x * 1e3, y * 1e3, z * 1e3,
+                    nx * normal_length * 1e3,
+                    ny * normal_length * 1e3,
+                    nz * normal_length * 1e3,
+                    color='red', alpha=0.5
+                )
+        
+        ax.set_xlabel('X (mm)')
+        ax.set_ylabel('Y (mm)')
+        ax.set_zlabel('Z (mm)')
+        ax.set_title(f'Transducer Array ({self.n_cols}×{self.n_rows} elements)')
+        
+        # Equal aspect ratio
+        max_range = max(self.array_width, self.array_height) * 1e3 / 2
+        ax.set_xlim(-max_range * 1.1, max_range * 1.1)
+        ax.set_ylim(-max_range * 1.1, max_range * 1.1)
+        
+        return ax
+    
+    def plot_lens(self, ax=None, n_points: int = 100, figsize: tuple = (10, 6)):
+        """Plot the acoustic lens cross-section.
+        
+        Shows the lens thickness profile along the elevation direction.
+        
+        Args:
+            ax: Matplotlib axes. Creates new figure if None.
+            n_points: Number of points for lens profile.
+            figsize: Figure size if creating new figure.
+            
+        Returns:
+            ax: The matplotlib axes object.
+        """
+        if not HAS_MATPLOTLIB:
+            raise ImportError("Matplotlib is required for plotting. Install with: pip install matplotlib")
+        
+        if not self.lens.layers:
+            print("No lens layers defined. Nothing to plot.")
+            return None
+        
+        if ax is None:
+            fig, ax = plt.subplots(figsize=figsize)
+        
+        # Y positions spanning the array elevation
+        y_range = self.array_height / 2 * 1.2
+        y_positions = np.linspace(-y_range, y_range, n_points)
+        
+        # Plot each layer
+        colors = plt.cm.viridis(np.linspace(0.2, 0.8, self.lens.n_layers))
+        
+        cumulative_z = np.zeros(n_points)
+        
+        for i, layer in enumerate(self.lens.layers):
+            thickness = layer.get_thickness_profile(y_positions)
+            
+            # Plot filled region for this layer
+            ax.fill_between(
+                y_positions * 1e3,
+                cumulative_z * 1e3,
+                (cumulative_z + thickness) * 1e3,
+                alpha=0.5,
+                color=colors[i],
+                label=f'Layer {i+1}: {layer.name}' if layer.name else f'Layer {i+1}'
+            )
+            
+            # Plot boundary line
+            ax.plot(y_positions * 1e3, (cumulative_z + thickness) * 1e3, 
+                   color=colors[i], linewidth=1.5)
+            
+            cumulative_z = cumulative_z + thickness
+        
+        # Plot transducer surface line
+        ax.axhline(y=0, color='black', linestyle='--', linewidth=1, label='Transducer surface')
+        
+        # Mark array extent
+        ax.axvline(x=-self.array_height/2 * 1e3, color='gray', linestyle=':', alpha=0.5)
+        ax.axvline(x=self.array_height/2 * 1e3, color='gray', linestyle=':', alpha=0.5)
+        
+        ax.set_xlabel('Elevation (mm)')
+        ax.set_ylabel('Thickness (mm)')
+        ax.set_title('Acoustic Lens Cross-Section')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+        
+        return ax
+    
+    def plot_array_2d(self, ax=None, figsize: tuple = (10, 8)):
+        """Plot the transducer element array in 2D (top-down view).
+        
+        Args:
+            ax: Matplotlib axes. Creates new figure if None.
+            figsize: Figure size if creating new figure.
+            
+        Returns:
+            ax: The matplotlib axes object.
+        """
+        if not HAS_MATPLOTLIB:
+            raise ImportError("Matplotlib is required for plotting. Install with: pip install matplotlib")
+        
+        if ax is None:
+            fig, ax = plt.subplots(figsize=figsize)
+        
+        # Draw each element as a rectangle
+        from matplotlib.patches import Rectangle
+        from matplotlib.collections import PatchCollection
+        
+        patches = []
         for i in range(self.n_elements):
-            x = self.element_positions[i, 0]
-            y = self.element_positions[i, 1]
-            z = z0 if z0 is not None else self.element_positions[i, 2]
-            ix, iy, iz = grid.world_to_index(x, y, z)
-            idx.append((ix, iy, iz))
-        return idx
-
-    def generate_element_surface_points(self, element_idx, n_points_x, n_points_y):
-        """
-        Generate uniformly distributed points on rectangular element surface.
+            x, y, z = self.element_positions[i]
+            w = self.element_width
+            h = self.element_height
+            
+            # Rectangle centered at element position
+            rect = Rectangle(
+                (x - w/2, y - h/2),
+                w, h
+            )
+            patches.append(rect)
         
-        Points are distributed on a regular orthogonal grid within element boundaries.
-        For curved transducers, points are generated relative to the element's
-        3D position.
+        # Color by z-position for curved arrays
+        collection = PatchCollection(patches, cmap='viridis', alpha=0.8, edgecolor='black', linewidth=0.5)
+        collection.set_array(self.z_positions)
+        ax.add_collection(collection)
+        
+        # Add colorbar for curved arrays
+        if self.roc > 0:
+            plt.colorbar(collection, ax=ax, label='Z position (m)')
+        
+        ax.set_xlim(-self.array_width/2 * 1.1, self.array_width/2 * 1.1)
+        ax.set_ylim(-self.array_height/2 * 1.1, self.array_height/2 * 1.1)
+        ax.set_xlabel('X - Lateral (m)')
+        ax.set_ylabel('Y - Elevation (m)')
+        ax.set_title(f'Transducer Array ({self.n_cols}×{self.n_rows} elements)')
+        ax.set_aspect('equal')
+        ax.grid(True, alpha=0.3)
+        
+        return ax
+    
+    # ===== BLI (Band-Limited Interpolation) Methods =====
+    
+    def generate_element_surface_points(self, element_idx: int,
+                                        n_points_x: int, n_points_y: int) -> np.ndarray:
+        """Generate uniformly distributed points on element surface.
         
         Args:
-            element_idx: Index of the element (0 to n_elements-1)
-            n_points_x: Number of sample points along element width (lateral)
-            n_points_y: Number of sample points along element height (elevation)
+            element_idx: Index of the element.
+            n_points_x: Number of points along element width.
+            n_points_y: Number of points along element height.
             
         Returns:
-            points: Array of shape (n_points_x * n_points_y, 3) with (x, y, z) coordinates
+            points: (n_points_x * n_points_y, 3) array of (x, y, z) coordinates.
         """
         if element_idx < 0 or element_idx >= self.n_elements:
             raise ValueError(f"Element index {element_idx} out of range [0, {self.n_elements})")
         
-        # Get element center position (3D)
-        center_x = self.element_positions[element_idx, 0]
-        center_y = self.element_positions[element_idx, 1]
-        center_z = self.element_positions[element_idx, 2]
+        # Get element center
+        center_x, center_y, center_z = self.element_positions[element_idx]
         
-        # Get element dimensions (support for variable height)
-        if self.element_heights is not None:
-            elem_height = self.element_heights[element_idx]
-        else:
-            elem_height = self.element_height
-        
-        # Generate uniform grid of points within element bounds
-        # Use linspace with inclusive endpoints for uniform coverage
+        # Generate uniform grid on element surface
         x_samples = np.linspace(-self.element_width/2, self.element_width/2, n_points_x)
-        y_samples = np.linspace(-elem_height/2, elem_height/2, n_points_y)
+        y_samples = np.linspace(-self.element_height/2, self.element_height/2, n_points_y)
         
-        # Create meshgrid
         xx, yy = np.meshgrid(x_samples, y_samples, indexing='xy')
         
-        # Flatten and offset by element center
+        # Offset by element center
         x_coords = center_x + xx.flatten()
         y_coords = center_y + yy.flatten()
         z_coords = np.full_like(x_coords, center_z)
         
-        points = np.stack([x_coords, y_coords, z_coords], axis=1)
-        return points
-
-    def _get_bli_star(self, kernel_radius, tolerance):
-        """
-        Compute and cache BLI star points based on tolerance.
-        
-        BLI star = meshgrid of bli_range for x, y, z dimensions.
-        Points are selected where bli_level = 1/(bli_x * bli_y * bli_z) <= tolerance.
-        
-        This is expensive for large kernels but reusable across all elements.
+        return np.stack([x_coords, y_coords, z_coords], axis=1)
+    
+    def create_element_mask(self, grid, element_idx: int,
+                           n_points_x: int = 5, n_points_y: int = 5,
+                           kernel_radius: int = 3, tolerance: float = 1e-3,
+                           staggered_component: str = None,
+                           use_gpu: bool = False) -> tuple:
+        """Create BLI mask for a single element.
         
         Args:
-            kernel_radius: Sinc kernel radius in grid cells
-            tolerance: Weight threshold for selecting BLI star points
+            grid: Grid object with axis vectors.
+            element_idx: Element index.
+            n_points_x: Sample points along width.
+            n_points_y: Sample points along height.
+            kernel_radius: Sinc kernel radius in grid cells.
+            tolerance: Weight threshold for BLI star selection.
+            staggered_component: None, 'x', 'y', or 'z' for staggered grids.
+            use_gpu: Use GPU acceleration.
             
         Returns:
-            bli_star_x, bli_star_y, bli_star_z: 1D arrays of selected BLI offsets
+            indices: (N, 3) array of grid indices.
+            weights: (N,) array of weights.
         """
-        cache_key = (kernel_radius, tolerance)
-        if cache_key in self._bli_star_cache:
-            return self._bli_star_cache[cache_key]
+        # Generate surface points
+        points = self.generate_element_surface_points(element_idx, n_points_x, n_points_y)
         
-        # Create BLI range: [-kernel_radius, ..., +kernel_radius]
-        bli_range = np.arange(-kernel_radius, kernel_radius + 1)
-        
-        # Create meshgrid for BLI star
-        bli_star_x, bli_star_y, bli_star_z = np.meshgrid(bli_range, bli_range, bli_range, indexing='ij')
-        
-        # Compute BLI level: 1/(x * y * z)
-        # Avoid division by zero: set zero entries to large value
-        with np.errstate(divide='ignore', invalid='ignore'):
-            bli_level_x = np.where(bli_star_x != 0, 1.0 / np.abs(bli_star_x), 1.0)
-            bli_level_y = np.where(bli_star_y != 0, 1.0 / np.abs(bli_star_y), 1.0)
-            bli_level_z = np.where(bli_star_z != 0, 1.0 / np.abs(bli_star_z), 1.0)
-            bli_level = bli_level_x * bli_level_y * bli_level_z
-        
-        # Select points where bli_level <= tolerance
-        bli_selected = bli_level >= tolerance
-        
-        # Extract selected offsets
-        bli_star_x_selected = bli_star_x[bli_selected]
-        bli_star_y_selected = bli_star_y[bli_selected]
-        bli_star_z_selected = bli_star_z[bli_selected]
-        
-        # Cache result
-        result = (bli_star_x_selected, bli_star_y_selected, bli_star_z_selected)
-        self._bli_star_cache[cache_key] = result
-        
-        return result
-
-    def band_limited_interpolation_weights(self, grid, points, z0=None, kernel_radius=3,
-                                          staggered_component=None, tolerance=1e-3, use_gpu=False):
-        """
-        Compute BLI weights for source points on grid using vectorized calculation.
-        
-        Implements correct BLI formula from reference:
-        weight(grid_node) = sinc((px - gx)/dx) * sinc((py - gy)/dy) * sinc((pz - gz)/dz)
-        
-        Fully vectorized implementation with BLI star pre-selection:
-        - px = (points[:,0] - (grid.x_vec[0] + offset)) / grid.dx
-        - ix = floor(px)
-        - rx = px - ix
-        - BLI star is pre-computed and cached for reuse across elements
-        - Uses 3D array approach for efficient index/weight computation
+        # Compute BLI weights
+        return self._band_limited_interpolation(
+            grid, points, kernel_radius, tolerance, staggered_component, use_gpu
+        )
+    
+    def create_all_element_masks(self, grid, n_points_x: int = 5, n_points_y: int = 5,
+                                 kernel_radius: int = 3, tolerance: float = 1e-3,
+                                 staggered: bool = False, use_gpu: bool = False) -> list:
+        """Create BLI masks for all elements.
         
         Args:
-            grid: Grid object with axis vectors (x_vec, y_vec, z_vec)
-            points: Array of (x, y, z) source point coordinates
-            z0: Deprecated - kept for backward compatibility. 
-                Uses points[:, 2] for z-coordinates.
-            kernel_radius: Sinc kernel radius in grid cells (e.g., 3 means -3 to +3)
-            staggered_component: None for pressure (centered), 'x', 'y', or 'z' for velocity
-            tolerance: Weight threshold for selecting BLI star points (default: 1e-3)
-            use_gpu: Use CuPy for GPU acceleration if available
+            grid: Grid object.
+            n_points_x: Sample points per element width.
+            n_points_y: Sample points per element height.
+            kernel_radius: Sinc kernel radius.
+            tolerance: Weight threshold.
+            staggered: If True, return staggered masks for velocity components.
+            use_gpu: Use GPU acceleration.
             
         Returns:
-            indices: (N, 3) array of grid indices (i, j, k)
-            weights: (N,) array of corresponding weights
+            If staggered=False: List of (indices, weights) tuples.
+            If staggered=True: List of dicts with 'vx', 'vy', 'vz' keys.
         """
-        # Issue deprecation warning for z0 parameter
-        if z0 is not None:
-            warnings.warn(
-                "The 'z0' parameter is deprecated and will be removed in a future version. "
-                "Pass z-coordinates via the 'points' array instead.",
-                DeprecationWarning,
-                stacklevel=2
-            )
+        masks = []
         
-        # Select array module (for GPU or CPU)
+        for elem_idx in range(self.n_elements):
+            if staggered:
+                mask = {
+                    'vx': self.create_element_mask(grid, elem_idx, n_points_x, n_points_y,
+                                                   kernel_radius, tolerance, 'x', use_gpu),
+                    'vy': self.create_element_mask(grid, elem_idx, n_points_x, n_points_y,
+                                                   kernel_radius, tolerance, 'y', use_gpu),
+                    'vz': self.create_element_mask(grid, elem_idx, n_points_x, n_points_y,
+                                                   kernel_radius, tolerance, 'z', use_gpu),
+                }
+            else:
+                mask = self.create_element_mask(
+                    grid, elem_idx, n_points_x, n_points_y,
+                    kernel_radius, tolerance, None, use_gpu
+                )
+            masks.append(mask)
+        
+        return masks
+    
+    def _band_limited_interpolation(self, grid, points: np.ndarray,
+                                    kernel_radius: int, tolerance: float,
+                                    staggered_component: str, use_gpu: bool) -> tuple:
+        """Compute BLI weights for source points.
+        
+        Uses sinc interpolation: weight = sinc((px-gx)/dx) * sinc((py-gy)/dy) * sinc((pz-gz)/dz)
+        
+        Args:
+            grid: Grid object with axis vectors.
+            points: (N, 3) array of point coordinates.
+            kernel_radius: Sinc kernel radius in grid cells.
+            tolerance: Weight threshold.
+            staggered_component: None, 'x', 'y', or 'z'.
+            use_gpu: Use GPU acceleration.
+            
+        Returns:
+            indices: (M, 3) array of grid indices.
+            weights: (M,) array of weights.
+        """
+        xp = cp if use_gpu and HAS_CUPY else np
+        
         if use_gpu and HAS_CUPY:
-            xp = cp
             points = cp.asarray(points)
-            grid_x_vec = cp.asarray(grid.x_vec)
-            grid_y_vec = cp.asarray(grid.y_vec)
-            grid_z_vec = cp.asarray(grid.z_vec)
+            grid_x = cp.asarray(grid.x_vec)
+            grid_y = cp.asarray(grid.y_vec)
+            grid_z = cp.asarray(grid.z_vec)
         else:
-            xp = np
-            grid_x_vec = grid.x_vec
-            grid_y_vec = grid.y_vec
-            grid_z_vec = grid.z_vec
+            grid_x = grid.x_vec
+            grid_y = grid.y_vec
+            grid_z = grid.z_vec
         
-        # Pre-compute reciprocals for better performance
-        inv_dx = 1.0 / grid.dx
-        inv_dy = 1.0 / grid.dy
-        inv_dz = 1.0 / grid.dz
+        # Grid spacing
+        dx, dy, dz = grid.dx, grid.dy, grid.dz
         
-        # Get BLI star (pre-computed and cached)
-        bli_star_x, bli_star_y, bli_star_z = self._get_bli_star(kernel_radius, tolerance)
-        n_bli_points = len(bli_star_x)
+        # Staggered grid offsets
+        offset_x = dx / 2 if staggered_component == 'x' else 0
+        offset_y = dy / 2 if staggered_component == 'y' else 0
+        offset_z = dz / 2 if staggered_component == 'z' else 0
         
-        if use_gpu and HAS_CUPY:
-            bli_star_x = cp.asarray(bli_star_x)
-            bli_star_y = cp.asarray(bli_star_y)
-            bli_star_z = cp.asarray(bli_star_z)
+        # Grid origins with offset
+        origin_x = grid_x[0] + offset_x
+        origin_y = grid_y[0] + offset_y
+        origin_z = grid_z[0] + offset_z
         
-        # Grid offsets for staggered components
-        offset_x, offset_y, offset_z = 0.0, 0.0, 0.0
-        if staggered_component == 'x':
-            offset_x = grid.dx / 2.0
-        elif staggered_component == 'y':
-            offset_y = grid.dy / 2.0
-        elif staggered_component == 'z':
-            offset_z = grid.dz / 2.0
+        # Normalized point positions
+        px = (points[:, 0] - origin_x) / dx
+        py = (points[:, 1] - origin_y) / dy
+        pz = (points[:, 2] - origin_z) / dz
         
-        # Vectorized calculation per axis
-        grid_origin_x = grid_x_vec[0] + offset_x
-        grid_origin_y = grid_y_vec[0] + offset_y
-        grid_origin_z = grid_z_vec[0] + offset_z
-        
-        n_points = points.shape[0]
-        
-        # Use actual point coordinates (points[:, 2]), not z0 scalar
-        px = (points[:, 0] - grid_origin_x) * inv_dx
-        py = (points[:, 1] - grid_origin_y) * inv_dy
-        pz = (points[:, 2] - grid_origin_z) * inv_dz
-        
-        # ix = floor(px)
+        # Base indices
         ix = xp.floor(px).astype(int)
         iy = xp.floor(py).astype(int)
         iz = xp.floor(pz).astype(int)
         
-        # rx = px - ix (fractional part)
+        # Fractional parts
         rx = px - ix
         ry = py - iy
         rz = pz - iz
         
-        # Compute sinc for all BLI star points
-        sinc_x_all = xp.sinc(rx[:, None] + bli_star_x[None, :])
-        sinc_y_all = xp.sinc(ry[:, None] + bli_star_y[None, :])
-        sinc_z_all = xp.sinc(rz[:, None] + bli_star_z[None, :])
+        # BLI star offsets
+        bli_range = np.arange(-kernel_radius, kernel_radius + 1)
+        bli_x, bli_y, bli_z = np.meshgrid(bli_range, bli_range, bli_range, indexing='ij')
+        bli_x = bli_x.flatten()
+        bli_y = bli_y.flatten()
+        bli_z = bli_z.flatten()
         
-        # Compute 3D weights
-        sinc_all = sinc_x_all * sinc_y_all * sinc_z_all
+        # Filter by tolerance (1/(|x|*|y|*|z|) >= tolerance)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            level_x = np.where(bli_x != 0, 1.0 / np.abs(bli_x), 1.0)
+            level_y = np.where(bli_y != 0, 1.0 / np.abs(bli_y), 1.0)
+            level_z = np.where(bli_z != 0, 1.0 / np.abs(bli_z), 1.0)
+            bli_level = level_x * level_y * level_z
         
-        # Generate indices for all points and BLI star offsets
-        ix_all = ix[:, None] + bli_star_x[None, :]
-        iy_all = iy[:, None] + bli_star_y[None, :]
-        iz_all = iz[:, None] + bli_star_z[None, :]
+        selected = bli_level >= tolerance
+        bli_x = bli_x[selected]
+        bli_y = bli_y[selected]
+        bli_z = bli_z[selected]
         
-        # Flatten all arrays
+        if use_gpu and HAS_CUPY:
+            bli_x = cp.asarray(bli_x)
+            bli_y = cp.asarray(bli_y)
+            bli_z = cp.asarray(bli_z)
+        
+        n_points = points.shape[0]
+        n_bli = len(bli_x)
+        
+        # Compute sinc weights
+        sinc_x = xp.sinc(rx[:, None] + bli_x[None, :])
+        sinc_y = xp.sinc(ry[:, None] + bli_y[None, :])
+        sinc_z = xp.sinc(rz[:, None] + bli_z[None, :])
+        
+        weights_all = sinc_x * sinc_y * sinc_z
+        
+        # Generate indices
+        ix_all = ix[:, None] + bli_x[None, :]
+        iy_all = iy[:, None] + bli_y[None, :]
+        iz_all = iz[:, None] + bli_z[None, :]
+        
+        # Flatten
         ix_flat = ix_all.flatten()
         iy_flat = iy_all.flatten()
         iz_flat = iz_all.flatten()
-        sinc_flat = sinc_all.flatten()
+        weights_flat = weights_all.flatten()
         
-        # Filter valid indices (within grid bounds)
-        valid_mask = (
+        # Filter valid indices
+        valid = (
             (ix_flat >= 0) & (ix_flat < grid.nx) &
             (iy_flat >= 0) & (iy_flat < grid.ny) &
             (iz_flat >= 0) & (iz_flat < grid.nz)
         )
         
-        ix_valid = ix_flat[valid_mask]
-        iy_valid = iy_flat[valid_mask]
-        iz_valid = iz_flat[valid_mask]
-        sinc_valid = sinc_flat[valid_mask]
+        ix_valid = ix_flat[valid]
+        iy_valid = iy_flat[valid]
+        iz_valid = iz_flat[valid]
+        weights_valid = weights_flat[valid]
         
         if len(ix_valid) == 0:
             return np.array([], dtype=np.int32).reshape(0, 3), np.array([], dtype=np.float32)
         
-        # Determine bounding box
-        ix_min = int(ix_valid.min() if use_gpu and HAS_CUPY else np.min(ix_valid))
-        ix_max = int(ix_valid.max() if use_gpu and HAS_CUPY else np.max(ix_valid))
-        iy_min = int(iy_valid.min() if use_gpu and HAS_CUPY else np.min(iy_valid))
-        iy_max = int(iy_valid.max() if use_gpu and HAS_CUPY else np.max(iy_valid))
-        iz_min = int(iz_valid.min() if use_gpu and HAS_CUPY else np.min(iz_valid))
-        iz_max = int(iz_valid.max() if use_gpu and HAS_CUPY else np.max(iz_valid))
+        # Aggregate weights at same indices
+        # Create local subgrid
+        ix_min, ix_max = int(ix_valid.min()), int(ix_valid.max())
+        iy_min, iy_max = int(iy_valid.min()), int(iy_valid.max())
+        iz_min, iz_max = int(iz_valid.min()), int(iz_valid.max())
         
-        # Local subgrid dimensions
-        subgrid_nx = ix_max - ix_min + 1
-        subgrid_ny = iy_max - iy_min + 1
-        subgrid_nz = iz_max - iz_min + 1
+        subgrid_shape = (ix_max - ix_min + 1, iy_max - iy_min + 1, iz_max - iz_min + 1)
+        weight_grid = xp.zeros(subgrid_shape, dtype=xp.float32)
         
-        # Check cache for reusable weight_grid
-        cache_key = (subgrid_nx, subgrid_ny, subgrid_nz, use_gpu)
-        if cache_key in self._weight_grid_cache:
-            weight_grid_local = self._weight_grid_cache[cache_key]
-            weight_grid_local[:] = 0
-        else:
-            weight_grid_local = xp.zeros((subgrid_nx, subgrid_ny, subgrid_nz), dtype=xp.float32)
-            self._weight_grid_cache[cache_key] = weight_grid_local
-        
-        # Map global indices to local subgrid coordinates
+        # Map to local indices
         ix_local = ix_valid - ix_min
         iy_local = iy_valid - iy_min
         iz_local = iz_valid - iz_min
         
-        # Accumulate weights in local 3D grid
         if use_gpu and HAS_CUPY:
-            linear_indices = ix_local + iy_local * subgrid_nx + iz_local * subgrid_nx * subgrid_ny
-            cp.scatter_add(weight_grid_local.flatten(), linear_indices, sinc_valid)
+            linear_idx = ix_local + iy_local * subgrid_shape[0] + iz_local * subgrid_shape[0] * subgrid_shape[1]
+            cp.scatter_add(weight_grid.flatten(), linear_idx, weights_valid)
         else:
-            np.add.at(weight_grid_local, (ix_local, iy_local, iz_local), sinc_valid)
+            np.add.at(weight_grid, (ix_local, iy_local, iz_local), weights_valid)
         
-        # Find non-zero cells in local grid
-        nonzero_mask = weight_grid_local != 0
+        # Extract non-zero entries
+        nonzero = weight_grid != 0
         if use_gpu and HAS_CUPY:
-            indices_i_local, indices_j_local, indices_k_local = cp.where(nonzero_mask)
-            weights = weight_grid_local[nonzero_mask]
+            i_local, j_local, k_local = cp.where(nonzero)
+            weights_out = weight_grid[nonzero]
             
-            indices_i = cp.asnumpy(indices_i_local) + ix_min
-            indices_j = cp.asnumpy(indices_j_local) + iy_min
-            indices_k = cp.asnumpy(indices_k_local) + iz_min
-            weights = cp.asnumpy(weights)
+            indices_i = cp.asnumpy(i_local) + ix_min
+            indices_j = cp.asnumpy(j_local) + iy_min
+            indices_k = cp.asnumpy(k_local) + iz_min
+            weights_out = cp.asnumpy(weights_out)
         else:
-            indices_i_local, indices_j_local, indices_k_local = np.where(nonzero_mask)
-            weights = weight_grid_local[nonzero_mask]
+            i_local, j_local, k_local = np.where(nonzero)
+            weights_out = weight_grid[nonzero]
             
-            indices_i = indices_i_local + ix_min
-            indices_j = indices_j_local + iy_min
-            indices_k = indices_k_local + iz_min
+            indices_i = i_local + ix_min
+            indices_j = j_local + iy_min
+            indices_k = k_local + iz_min
         
         indices = np.stack([indices_i, indices_j, indices_k], axis=1).astype(np.int32)
-        weights = weights.astype(np.float32)
+        weights_out = weights_out.astype(np.float32)
         
-        # Normalize so total weight sums to 1.0
-        weight_sum = weights.sum()
+        # Normalize
+        weight_sum = weights_out.sum()
         if weight_sum > 1e-10:
-            weights = weights / weight_sum
+            weights_out = weights_out / weight_sum
         
-        return indices, weights
-
-    def create_element_mask(self, grid, element_idx, n_points_x, n_points_y, z0=None,
-                           kernel_radius=3, tolerance=1e-3, staggered_component=None, use_gpu=False):
-        """
-        Create BLI mask for a single element.
-        
-        Args:
-            grid: Grid object
-            element_idx: Element index
-            n_points_x: Number of sample points along width
-            n_points_y: Number of sample points along height
-            z0: Deprecated - kept for backward compatibility. 
-                Uses element's 3D position from element_positions.
-            kernel_radius: Sinc kernel radius (grid cells)
-            tolerance: Weight threshold for BLI star point selection
-            staggered_component: None, 'x', 'y', or 'z' for staggered grids
-            use_gpu: Use GPU acceleration
-            
-        Returns:
-            indices: (N, 3) array of grid indices
-            weights: (N,) array of weights
-        """
-        # Issue deprecation warning for z0 parameter
-        if z0 is not None:
-            warnings.warn(
-                "The 'z0' parameter is deprecated and will be removed in a future version. "
-                "Use the element's z-coordinate in element_positions instead.",
-                DeprecationWarning,
-                stacklevel=2
-            )
-        
-        # Generate surface points (uses element's 3D position)
-        points = self.generate_element_surface_points(element_idx, n_points_x, n_points_y)
-        
-        # Compute BLI weights
-        indices, weights = self.band_limited_interpolation_weights(
-            grid, points, z0, kernel_radius, staggered_component, tolerance, use_gpu
-        )
-        
-        return indices, weights
-
-    def create_element_masks_staggered(self, grid, element_idx, n_points_x, n_points_y,
-                                      z0=None, kernel_radius=3, tolerance=1e-3, use_gpu=False):
-        """
-        Create staggered grid masks for velocity components.
-        
-        Returns 3 masks for velocity components Vx, Vy, Vz where each component
-        is staggered along its corresponding axis.
-        
-        Args:
-            grid: Grid object
-            element_idx: Element index
-            n_points_x: Number of sample points along width
-            n_points_y: Number of sample points along height
-            z0: Deprecated - kept for backward compatibility. 
-                Uses element's 3D position from element_positions.
-            kernel_radius: Sinc kernel radius
-            tolerance: Weight threshold for BLI star point selection
-            use_gpu: Use GPU acceleration
-            
-        Returns:
-            dict: {'vx': (indices, weights), 'vy': (indices, weights), 'vz': (indices, weights)}
-        """
-        # Issue deprecation warning for z0 parameter
-        if z0 is not None:
-            warnings.warn(
-                "The 'z0' parameter is deprecated and will be removed in a future version. "
-                "Use the element's z-coordinate in element_positions instead.",
-                DeprecationWarning,
-                stacklevel=2
-            )
-        
-        # Generate surface points once
-        points = self.generate_element_surface_points(element_idx, n_points_x, n_points_y)
-        
-        # Create mask for each velocity component
-        masks = {}
-        for component in ['x', 'y', 'z']:
-            indices, weights = self.band_limited_interpolation_weights(
-                grid, points, z0, kernel_radius, staggered_component=component, 
-                tolerance=tolerance, use_gpu=use_gpu
-            )
-            masks[f'v{component}'] = (indices, weights)
-        
-        return masks
-
-    def create_all_element_masks(self, grid, n_points_x, n_points_y, z0=None,
-                                 kernel_radius=3, tolerance=1e-3, staggered=False, use_gpu=False):
-        """
-        Create BLI masks for all elements.
-        
-        Args:
-            grid: Grid object
-            n_points_x: Number of sample points along width per element
-            n_points_y: Number of sample points along height per element
-            z0: Deprecated - kept for backward compatibility. 
-                Uses element's 3D position from element_positions.
-            kernel_radius: Sinc kernel radius
-            tolerance: Weight threshold for BLI star point selection
-            staggered: If True, return staggered masks for velocity components
-            use_gpu: Use GPU acceleration
-            
-        Returns:
-            If staggered=False: list of (indices, weights) tuples
-            If staggered=True: list of dicts with 'vx', 'vy', 'vz' keys
-        """
-        # Issue deprecation warning for z0 parameter
-        if z0 is not None:
-            warnings.warn(
-                "The 'z0' parameter is deprecated and will be removed in a future version. "
-                "Use the element's z-coordinate in element_positions instead.",
-                DeprecationWarning,
-                stacklevel=2
-            )
-        
-        masks = []
-        
-        for elem_idx in range(self.n_elements):
-            if staggered:
-                mask = self.create_element_masks_staggered(
-                    grid, elem_idx, n_points_x, n_points_y, z0, kernel_radius, tolerance, use_gpu
-                )
-            else:
-                mask = self.create_element_mask(
-                    grid, elem_idx, n_points_x, n_points_y, z0, kernel_radius, tolerance, None, use_gpu
-                )
-            masks.append(mask)
-        
-        return masks
+        return indices, weights_out
+    
+    # ===== String Representation =====
+    
+    def __repr__(self) -> str:
+        return (f"Transducer(n_cols={self.n_cols}, n_rows={self.n_rows}, "
+                f"pitch={self.pitch*1e3:.3f}mm, roc={self.roc*1e3:.1f}mm, "
+                f"lens_layers={self.lens.n_layers})")
+    
+    def __str__(self) -> str:
+        lines = [
+            f"Transducer Array ({self.n_cols} × {self.n_rows} = {self.n_elements} elements)",
+            f"  Pitch: {self.pitch*1e3:.3f}mm (lateral), {self.row_pitch*1e3:.3f}mm (elevation)",
+            f"  Element size: {self.element_width*1e3:.3f}mm × {self.element_height*1e3:.3f}mm",
+            f"  Array size: {self.array_width*1e3:.2f}mm × {self.array_height*1e3:.2f}mm",
+            f"  ROC: {self.roc*1e3:.1f}mm {'(curved)' if self.roc > 0 else '(flat)'}",
+            f"  Center frequency: {self.center_freq/1e6:.1f}MHz",
+            f"  Wavelength: {self.wavelength*1e3:.3f}mm",
+            f"  Lens layers: {self.lens.n_layers}",
+        ]
+        if self.lens.n_layers > 0:
+            lines.append(f"  Lens max thickness: {self.lens.total_max_thickness*1e3:.3f}mm")
+        return "\n".join(lines)
 
 
 # Test the implementation
 if __name__ == '__main__':
-    from grid import Grid
+    print("=" * 70)
+    print("TRANSDUCER MODULE TEST")
+    print("=" * 70)
     
-    print("Testing unified Transducer class with new interface...")
-    print("="*70)
+    # Test 1: Basic flat array
+    print("\n=== Test 1: Basic Flat Array ===")
+    tx1 = Transducer(n_cols=32, n_rows=8, pitch=0.0003, roc=0)
+    print(tx1)
+    print(f"\nElement 0 position: {tx1.get_element_position(0) * 1e3} mm")
+    print(f"Element 0 angle: {tx1.get_element_angle(0)} rad")
+    print(f"Element 0 size: {tx1.get_element_size()} m")
     
-    # Create test setup
-    grid = Grid(nx=64, ny=64, nz=64, dx=1e-4)
+    # Test 2: Curved array
+    print("\n=== Test 2: Curved Array ===")
+    tx2 = Transducer(n_cols=64, n_rows=1, pitch=0.0003, roc=0.05)
+    print(tx2)
+    print(f"\nZ-range: [{tx2.z_positions.min()*1e3:.4f}, {tx2.z_positions.max()*1e3:.4f}] mm")
     
-    # Test 1: 1D Linear Transducer (roc=0 or None)
-    print("\n=== Test 1: 1D Linear Transducer (roc=0) ===")
-    tx_linear = Transducer(n_cols=32, n_rows=1, pitch=0.0003, roc=0)
-    print(f"Created linear transducer:")
-    print(f"  n_cols={tx_linear.n_cols}, n_rows={tx_linear.n_rows}")
-    print(f"  Total elements: {tx_linear.n_elements}")
-    print(f"  ROC: {tx_linear.roc}m (0 = linear)")
-    print(f"  Element positions shape: {tx_linear.element_positions.shape}")
-    print(f"  Z-range: [{tx_linear.element_positions[:, 2].min():.4f}, {tx_linear.element_positions[:, 2].max():.4f}]m")
+    # Test 3: Array with acoustic lens
+    print("\n=== Test 3: Array with Acoustic Lens ===")
+    lens = AcousticLens()
+    lens.add_layer(LensLayer(elevational_roc=0.020, max_thickness=0.001, name="Focus layer"))
+    lens.add_layer(LensLayer(elevational_roc=0, max_thickness=0.0005, name="Matching layer"))
     
-    # Test 2: Convex Transducer (roc > 0)
-    print("\n=== Test 2: Convex Transducer (roc=0.05m) ===")
-    tx_convex = Transducer(n_cols=32, n_rows=1, pitch=0.0003, roc=0.05)
-    print(f"Created convex transducer:")
-    print(f"  n_cols={tx_convex.n_cols}, n_rows={tx_convex.n_rows}")
-    print(f"  Total elements: {tx_convex.n_elements}")
-    print(f"  ROC: {tx_convex.roc}m (>0 = convex)")
-    print(f"  Element positions shape: {tx_convex.element_positions.shape}")
-    print(f"  Z-range: [{tx_convex.element_positions[:, 2].min():.4f}, {tx_convex.element_positions[:, 2].max():.4f}]m")
-    x_positions = tx_convex.element_positions[:, 0]
-    print(f"  X-range: [{x_positions.min()*1e3:.3f}, {x_positions.max()*1e3:.3f}]mm")
+    tx3 = Transducer(n_cols=64, n_rows=5, pitch=0.0003, row_pitch=0.0004, lens=lens)
+    print(tx3)
     
-    # Test 3: 1.5D Linear Transducer
-    print("\n=== Test 3: 1.5D Linear Transducer ===")
-    tx_1p5d = Transducer(n_cols=32, n_rows=5, pitch=0.0003, row_pitch=0.0004, roc=0)
-    print(f"Created 1.5D transducer:")
-    print(f"  n_cols={tx_1p5d.n_cols}, n_rows={tx_1p5d.n_rows}")
-    print(f"  Total elements: {tx_1p5d.n_elements}")
-    print(f"  ROC: {tx_1p5d.roc}m (0 = linear)")
-    print(f"  Element positions shape: {tx_1p5d.element_positions.shape}")
+    # Test lens profile
+    y = np.linspace(-0.002, 0.002, 21)
+    thickness = lens.get_total_thickness_profile(y)
+    print(f"\nLens thickness range: [{thickness.min()*1e3:.3f}, {thickness.max()*1e3:.3f}] mm")
     
-    # Test 4: 2D Matrix Transducer
-    print("\n=== Test 4: 2D Matrix Transducer ===")
-    tx_2d = Transducer(n_cols=16, n_rows=16, pitch=0.0003, roc=0)
-    print(f"Created 2D matrix transducer:")
-    print(f"  n_cols={tx_2d.n_cols}, n_rows={tx_2d.n_rows}")
-    print(f"  Total elements: {tx_2d.n_elements}")
-    print(f"  ROC: {tx_2d.roc}m (0 = linear)")
-    print(f"  Element positions shape: {tx_2d.element_positions.shape}")
+    # Test 4: Focusing delays
+    print("\n=== Test 4: Focusing Delays ===")
+    focus = (0.0, 0.0, 0.03)
+    delays = tx1.delays_for_focus(focus)
+    print(f"Focus at {focus[2]*1e3:.0f}mm depth")
+    print(f"Delay range: [{delays.min()*1e6:.3f}, {delays.max()*1e6:.3f}] µs")
     
-    # Test 5: Backward compatibility
-    print("\n=== Test 5: Backward Compatibility ===")
-    tx_legacy = Transducer(n_elements_x=8, n_elements_y=8, pitch=0.0003)
-    print(f"Created transducer using legacy parameters:")
-    print(f"  n_cols={tx_legacy.n_cols}, n_rows={tx_legacy.n_rows}")
-    print(f"  n_elements_x={tx_legacy.n_elements_x}, n_elements_y={tx_legacy.n_elements_y}")
-    print(f"  Total elements: {tx_legacy.n_elements}")
+    # Test 5: Element indexing
+    print("\n=== Test 5: Element Indexing ===")
+    for idx in [0, 31, 32, 255]:
+        if idx < tx1.n_elements:
+            row, col = tx1.get_element_row_col(idx)
+            print(f"Element {idx}: row={row}, col={col}")
     
-    # Test 6: 1.5D Convex Array (NEW!)
-    print("\n=== Test 6: 1.5D Convex Array ===")
-    tx_1p5d_convex = Transducer(n_cols=32, n_rows=5, pitch=0.0003, row_pitch=0.0004, roc=0.05)
-    print(f"Created 1.5D convex transducer:")
-    print(f"  n_cols={tx_1p5d_convex.n_cols}, n_rows={tx_1p5d_convex.n_rows}")
-    print(f"  Total elements: {tx_1p5d_convex.n_elements}")
-    print(f"  ROC: {tx_1p5d_convex.roc}m (>0 = convex)")
-    z_positions = tx_1p5d_convex.element_positions[:, 2]
-    print(f"  Z-range: [{z_positions.min():.4f}, {z_positions.max():.4f}]m (curved)")
+    # Test 6: Array properties
+    print("\n=== Test 6: Array Properties ===")
+    print(f"Array size: {tx1.array_size[0]*1e3:.2f}mm × {tx1.array_size[1]*1e3:.2f}mm")
+    print(f"Min dimension: {tx1.min_dimension*1e3:.2f}mm")
+    print(f"Max dimension: {tx1.max_dimension*1e3:.2f}mm")
     
-    # Test 7: 2D Matrix Convex Array (NEW!)
-    print("\n=== Test 7: 2D Matrix Convex Array ===")
-    tx_2d_convex = Transducer(n_cols=16, n_rows=16, pitch=0.0003, roc=0.06)
-    print(f"Created 2D matrix convex transducer:")
-    print(f"  n_cols={tx_2d_convex.n_cols}, n_rows={tx_2d_convex.n_rows}")
-    print(f"  Total elements: {tx_2d_convex.n_elements}")
-    print(f"  ROC: {tx_2d_convex.roc}m (>0 = convex)")
-    z_positions = tx_2d_convex.element_positions[:, 2]
-    print(f"  Z-range: [{z_positions.min():.4f}, {z_positions.max():.4f}]m (curved)")
+    # Test 7: Plotting (if matplotlib available)
+    if HAS_MATPLOTLIB:
+        print("\n=== Test 7: Plotting ===")
+        print("Creating plots...")
+        
+        # Create a figure with subplots
+        fig = plt.figure(figsize=(15, 5))
+        
+        # Plot 1: 3D array view
+        ax1 = fig.add_subplot(131, projection='3d')
+        tx1.plot_array(ax=ax1, show_normals=False)
+        
+        # Plot 2: 2D array view
+        ax2 = fig.add_subplot(132)
+        tx1.plot_array_2d(ax=ax2)
+        
+        # Plot 3: Lens cross-section
+        ax3 = fig.add_subplot(133)
+        tx3.plot_lens(ax=ax3)
+        
+        plt.tight_layout()
+        plt.savefig('/tmp/transducer_test_plots.png', dpi=150)
+        print("Plots saved to /tmp/transducer_test_plots.png")
+    else:
+        print("\n=== Test 7: Plotting (skipped - matplotlib not available) ===")
     
-    # Test 8: BLI Mask Generation
-    print("\n=== Test 8: BLI Mask Generation ===")
-    points = tx_linear.generate_element_surface_points(0, n_points_x=5, n_points_y=5)
-    print(f"Generated {len(points)} surface points")
-    indices, weights = tx_linear.create_element_mask(grid, 0, n_points_x=5, n_points_y=5)
-    print(f"Sparse entries: {len(weights)}")
-    print(f"Weight sum: {weights.sum():.6f} (should be ~1.0)")
-    
-    # Test 9: Focusing and steering
-    print("\n=== Test 9: 3D Focusing ===")
-    delays_linear = tx_linear.delays_for_focus((0.0, 0.0, 0.03))
-    print(f"Linear 1D array delay range: [{delays_linear.min()*1e6:.3f}, {delays_linear.max()*1e6:.3f}]µs")
-    
-    delays_convex = tx_convex.delays_for_focus((0.0, 0.0, 0.03))
-    print(f"Convex 1D array delay range: [{delays_convex.min()*1e6:.3f}, {delays_convex.max()*1e6:.3f}]µs")
-    
-    delays_1p5d_convex = tx_1p5d_convex.delays_for_focus((0.0, 0.0, 0.03))
-    print(f"1.5D convex array delay range: [{delays_1p5d_convex.min()*1e6:.3f}, {delays_1p5d_convex.max()*1e6:.3f}]µs")
-    
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("✓ All tests completed successfully!")
-    print("\nSummary:")
-    print("  • Linear (1D): n_cols=N, n_rows=1, roc=0")
-    print("  • Convex (1D): n_cols=N, n_rows=1, roc>0")
-    print("  • 1.5D Linear:  n_cols=N, n_rows=3-7, roc=0")
-    print("  • 1.5D Convex:  n_cols=N, n_rows=3-7, roc>0 (NEW!)")
-    print("  • 2D Matrix Linear: n_cols=N, n_rows=N, roc=0")
-    print("  • 2D Matrix Convex: n_cols=N, n_rows=N, roc>0 (NEW!)")
-    print("  • Backward compatibility maintained with n_elements_x/y")
+    print("=" * 70)
