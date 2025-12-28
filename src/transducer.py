@@ -15,7 +15,6 @@ import numpy as np
 
 try:
     import matplotlib.pyplot as plt
-    from mpl_toolkits.mplot3d import Axes3D
     HAS_MATPLOTLIB = True
 except ImportError:
     HAS_MATPLOTLIB = False
@@ -87,14 +86,17 @@ class LensLayer:
             return np.full_like(y_positions, self.max_thickness, dtype=float)
         
         roc = abs(self.elevational_roc)
-        # Calculate lens surface profile using arc equation
+        # Calculate lens surface profile using circular arc equation:
+        # For a circle of radius R centered at (0, R), the height at position y is:
+        # h(y) = R - sqrt(R² - y²)
+        # This gives h=0 at y=0 and h increases toward the edges.
         # For convex: thicker in center, thinner at edges
         # For concave: thinner in center, thicker at edges
         
         # Clamp y_positions to valid range for arc calculation
         y_clipped = np.clip(y_positions, -roc, roc)
         
-        # Height of arc at each y position
+        # Height of arc at each y position: h = R - sqrt(R² - y²)
         arc_height = roc - np.sqrt(np.maximum(0, roc**2 - y_clipped**2))
         
         if self.is_convex:
@@ -181,7 +183,7 @@ class AcousticLens:
         
         for layer in self.layers:
             thickness = layer.get_thickness_profile(y_positions)
-            cumulative_z = cumulative_z + thickness
+            cumulative_z += thickness
             boundaries.append(cumulative_z.copy())
         
         return boundaries
@@ -661,7 +663,7 @@ class Transducer:
             ax.plot(y_positions * 1e3, (cumulative_z + thickness) * 1e3, 
                    color=colors[i], linewidth=1.5)
             
-            cumulative_z = cumulative_z + thickness
+            cumulative_z += thickness
         
         # Plot transducer surface line
         ax.axhline(y=0, color='black', linestyle='--', linewidth=1, label='Transducer surface')
@@ -897,7 +899,11 @@ class Transducer:
         bli_y = bli_y.flatten()
         bli_z = bli_z.flatten()
         
-        # Filter by tolerance (1/(|x|*|y|*|z|) >= tolerance)
+        # Filter BLI star points by tolerance threshold.
+        # The sinc function decays as 1/|x| for large x, so the product of
+        # sinc values decays as 1/(|x|*|y|*|z|). We skip points where this
+        # product is below the tolerance to improve efficiency while
+        # maintaining accuracy. Points at the origin (0,0,0) have level=1.
         with np.errstate(divide='ignore', invalid='ignore'):
             level_x = np.where(bli_x != 0, 1.0 / np.abs(bli_x), 1.0)
             level_y = np.where(bli_y != 0, 1.0 / np.abs(bli_y), 1.0)
